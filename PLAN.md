@@ -384,8 +384,8 @@ Front matter:
 ```yaml
 ---
 provider: github-copilot
-model: claude-opus-4.7
-thinking: high
+model: gpt-5.5
+thinking: medium
 mode: bugfix
 gate: |
   set -e

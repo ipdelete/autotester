@@ -282,7 +282,20 @@ export async function runAutotester(options: RunOptions): Promise<number> {
 
       process.stdout.write(`\n[harness] --- attempt ${attempt}/${options.maxAttempts} (best=${bestMetric}, elapsed=${Math.round(elapsedSec)}s) ---\n`);
       const headBefore = headSha(repo);
-      await session.prompt(turnPrompt, { expandPromptTemplates: false });
+      let promptAccepted: boolean | undefined;
+      await session.prompt(turnPrompt, {
+        expandPromptTemplates: false,
+        preflightResult: (didSucceed: boolean) => {
+          promptAccepted = didSucceed;
+        },
+      });
+      if (promptAccepted === false) {
+        throw new Error(
+          `Agent prompt was rejected before execution ` +
+            `(provider=${providerResolved.value}, model=${modelResolved.value}, ` +
+            `thinking=${thinkingResolved.value ?? "default"}).`,
+        );
+      }
       const headAfter = headSha(repo);
 
       if (headAfter === headBefore) {
