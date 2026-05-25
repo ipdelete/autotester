@@ -51,7 +51,28 @@ preserve existing work.
 
 ```text
 autotester init <repo> [--program <path>] [--force]
-autotester run <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty]
+                       [--editable <glob>]... [--readonly <glob>]...
+autotester run  <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty]
+                       [--tag <name>] [--attempt-timeout <seconds>]
+                       [--provider <id>] [--model <pattern>] [--thinking <level>]
+```
+
+`--tag <name>` creates a fresh `autotester/<name>` branch from current
+HEAD and refuses to reuse an existing tag. `--attempt-timeout <sec>` is
+injected into the prompt as `ATTEMPT_TIMEOUT` for the program to use when
+wrapping its `GATE_CMD`/`METRIC_CMD` invocations.
+
+The model triple is resolved per field with this priority: CLI flag >
+program front matter > built-in default (`github-copilot/claude-opus-4.7`,
+no thinking level). Programs declare their preferred model in optional
+YAML front matter:
+
+```yaml
+---
+provider: github-copilot
+model: claude-opus-4.7
+thinking: medium
+---
 ```
 
 `--max-attempts` is a runtime instruction injected into the prompt. It is a
@@ -60,8 +81,15 @@ changes remain.
 
 ## Files in target repos
 
-- `program.md` — repo-specific agent policy.
-- `results.tsv` — local run log. Do not commit unless you explicitly want to.
+- `program.md` — repo-specific agent policy (optional YAML front matter for
+  provider/model/thinking).
+- `results.tsv` — local run log. Header is
+  `commit\tmetric\tstatus\tcategory\tdescription`. Do not commit unless you
+  explicitly want to.
+- `.autotester.json` — scope declaration (only present when `init` was given
+  `--editable`/`--readonly`).
+- `.git/hooks/pre-commit` — installed by `init` when scope is declared.
+  Rejects staged paths that violate the scope.
 
 ## License
 

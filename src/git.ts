@@ -40,6 +40,28 @@ export function currentHead(repo: string): string {
   return git(repo, ["rev-parse", "--short=7", "HEAD"]);
 }
 
+export function localBranchExists(repo: string, name: string): boolean {
+  try {
+    git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${name}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function remoteBranchExists(repo: string, name: string): boolean {
+  try {
+    const out = git(repo, ["for-each-ref", "--format=%(refname)", `refs/remotes/*/${name}`]);
+    return out.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function createBranch(repo: string, name: string): void {
+  git(repo, ["checkout", "-b", name]);
+}
+
 export function summarizeGit(repo: string, since?: string): GitSummary {
   const branch = currentBranch(repo);
   const status = gitStatus(repo);

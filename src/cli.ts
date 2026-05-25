@@ -2,18 +2,32 @@
 import { copyFileSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { bundledProgramPath, RESULTS_HEADER } from "./prompt.js";
+import { installPreCommitHook, writeConfig } from "./scope.js";
 import { runAutotester } from "./runner.js";
 
 interface ParsedArgs {
   command?: string;
   positionals: string[];
-  flags: Map<string, string | boolean>;
+  flags: Map<string, string[] | boolean>;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
-  const flags = new Map<string, string | boolean>();
+  const flags = new Map<string, string[] | boolean>();
   let command: string | undefined;
+
+  function pushFlag(name: string, value: string | true): void {
+    if (value === true) {
+      flags.set(name, true);
+      return;
+    }
+    const prior = flags.get(name);
+    if (Array.isArray(prior)) {
+      prior.push(value);
+    } else {
+      flags.set(name, [value]);
+    }
+  }
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -26,14 +40,14 @@ function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`Invalid flag: ${arg}`);
       }
       if (inlineValue !== undefined) {
-        flags.set(name, inlineValue);
+        pushFlag(name, inlineValue);
       } else {
         const next = argv[i + 1];
         if (next && !next.startsWith("-")) {
-          flags.set(name, next);
+          pushFlag(name, next);
           i += 1;
         } else {
-          flags.set(name, true);
+          pushFlag(name, true);
         }
       }
       continue;
@@ -48,7 +62,10 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, positionals, flags };
 }
 
-function flagString(flags: Map<string, string | boolean>, name: string): string | undefined {
+function flagString(
+  flags: Map<string, string[] | boolean>,
+  name: string,
+): string | undefined {
   const value = flags.get(name);
   if (value === undefined) {
     return undefined;
@@ -56,10 +73,31 @@ function flagString(flags: Map<string, string | boolean>, name: string): string 
   if (typeof value === "boolean") {
     throw new Error(`--${name} requires a value`);
   }
+  if (value.length > 1) {
+    throw new Error(`--${name} given more than once`);
+  }
+  return value[0];
+}
+
+function flagStringList(
+  flags: Map<string, string[] | boolean>,
+  name: string,
+): string[] {
+  const value = flags.get(name);
+  if (value === undefined) {
+    return [];
+  }
+  if (typeof value === "boolean") {
+    throw new Error(`--${name} requires a value`);
+  }
   return value;
 }
 
-function flagInt(flags: Map<string, string | boolean>, name: string, fallback: number): number {
+function flagInt(
+  flags: Map<string, string[] | boolean>,
+  name: string,
+  fallback: number,
+): number {
   const value = flagString(flags, name);
   if (value === undefined) {
     return fallback;
@@ -76,11 +114,15 @@ function help(): string {
 
 Usage:
   autotester init <repo> [--program <path>] [--force]
-  autotester run <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty] [--model <provider/model>] [--thinking <level>]
+                         [--editable <glob>]... [--readonly <glob>]...
+  autotester run  <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty]
+                         [--tag <name>] [--attempt-timeout <seconds>]
+                         [--provider <id>] [--model <pattern>] [--thinking <level>]
 
 Commands:
-  init   Copy a program.md and initialize results.tsv in a target repo
-  run    Run a bounded program-driven Pi coding-agent loop in a target repo
+  init   Copy a program.md, initialize results.tsv, write .autotester.json,
+         and install a pre-commit hook enforcing the declared scope.
+  run    Run a program-driven Pi coding-agent loop in a target repo.
 `;
 }
 
@@ -92,7 +134,7 @@ function requireRepo(positionals: string[]): string {
   return resolve(repo);
 }
 
-function init(repoArg: string, flags: Map<string, string | boolean>): void {
+function init(repoArg: string, flags: Map<string, string[] | boolean>): void {
   const repo = resolve(repoArg);
   if (!existsSync(repo) || !statSync(repo).isDirectory()) {
     throw new Error(`${repo} is not a directory`);
@@ -110,9 +152,30 @@ function init(repoArg: string, flags: Map<string, string | boolean>): void {
   if (!existsSync(resultsPath)) {
     writeFileSync(resultsPath, RESULTS_HEADER, "utf8");
   }
-
   console.log(`wrote ${programPath}`);
   console.log(`initialized ${resultsPath}`);
+
+  const editable = flagStringList(flags, "editable");
+  const readonly = flagStringList(flags, "readonly");
+  if (editable.length > 0 || readonly.length > 0) {
+    writeConfig(repo, { editable, readonly });
+    console.log(`wrote ${resolve(repo, ".autotester.json")}`);
+    if (existsSync(resolve(repo, ".git"))) {
+      const result = installPreCommitHook(repo);
+      const hookPath = resolve(repo, ".git", "hooks", "pre-commit");
+      if (result.chained) {
+        console.log(
+          `installed pre-commit hook at ${hookPath} (existing hook chained as pre-commit.user)`,
+        );
+      } else {
+        console.log(`installed pre-commit hook at ${hookPath}`);
+      }
+    } else {
+      console.log(
+        "warning: no .git directory found; scope is declared but no pre-commit hook installed",
+      );
+    }
+  }
 }
 
 async function main(): Promise<number> {
@@ -134,8 +197,11 @@ async function main(): Promise<number> {
       maxAttempts: flagInt(parsed.flags, "max-attempts", 10),
       allowDirty: parsed.flags.get("allow-dirty") === true,
       allowPush: parsed.flags.get("push") === true,
+      provider: flagString(parsed.flags, "provider"),
       model: flagString(parsed.flags, "model"),
       thinking: flagString(parsed.flags, "thinking"),
+      tag: flagString(parsed.flags, "tag"),
+      attemptTimeout: flagInt(parsed.flags, "attempt-timeout", 600),
     });
     return 0;
   }
