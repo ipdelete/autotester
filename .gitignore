@@ -1,10 +1,10 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# Dependencies
+node_modules/
 
-# Virtual environments
-.venv
+# Build output
+dist/
+
+# Logs and local environment
+*.log
+.env
+.env.*

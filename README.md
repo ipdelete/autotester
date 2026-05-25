@@ -1,65 +1,67 @@
 # autotester
 
-`autotester` is a tiny protocol for agent-driven repository improvement loops.
+`autotester` runs program-driven coding-agent loops for conservative repository
+improvement.
 
-It borrows the core idea from autonomous research loops: make one small change, run the repo's checks, keep the change only if it is clearly better, and log every attempt. Instead of optimizing a training metric, `autotester` optimizes code quality through conservative gates: passing tests, small diffs, behavior preservation, and obvious maintainability wins.
+The product is the program: `program.md` tells the agent how to inspect, refine,
+validate, commit, discard, and log small changes. The CLI is intentionally thin;
+it loads the program, starts a Pi coding-agent session in the target repository,
+and prints a summary when the run finishes.
 
-## Quick start
+## Requirements
 
-Run directly from GitHub with `uv`:
+- Node.js 22.19+
+- `pnpm`
+- Pi authentication/model configuration. Run `pi` and use `/login`, or configure
+  provider API keys supported by Pi.
+
+## Usage
+
+From a clone of this repository:
 
 ```bash
-uvx --from git+https://github.com/ipdelete/autotester autotester init
+pnpm install
+pnpm build
+npm link
 ```
 
-Or, from this repository:
+Initialize a repository with the default program:
 
 ```bash
-uv run autotester init
+autotester init ~/src/my-repo
 ```
 
-This writes two files into the current repository:
+Run a bounded local-only loop:
 
-- `program.md` — instructions for a coding agent.
-- `results.tsv` — an untracked experiment log.
-
-Then start your coding agent with:
-
-```txt
-Read program.md and start an autotester run. Establish the baseline, then make one small code-quality improvement at a time. Keep only changes that pass validation and are clearly simpler, safer, or better tested.
+```bash
+autotester run ~/src/my-repo
 ```
 
-## What the loop does
+Use a repo-specific program:
 
-Each iteration:
+```bash
+autotester run ~/src/my-repo --program ~/src/my-repo/program.md --max-attempts 10
+```
 
-1. Finds one high-confidence improvement.
-2. Makes the smallest useful change.
-3. Runs targeted validation.
-4. Keeps and commits the change only when checks pass and the improvement is obvious.
-5. Logs the result to `results.tsv`.
-6. Reverts ambiguous, risky, broad, or failing changes.
+By default, `run` refuses to start if the target repository has uncommitted
+tracked changes. Use `--allow-dirty` only when the program should explicitly
+preserve existing work.
 
-## Good first tracks
-
-- **test hardening**: add missing edge cases or strengthen weak assertions.
-- **simplification**: remove unnecessary branches, wrappers, or indirection.
-- **dead code**: delete unused code when the repo's tools confirm it is safe.
-- **type safety**: replace unsafe casts or nullable assumptions with real checks.
-- **error handling**: make failure modes explicit and useful.
-
-## Safety model
-
-`autotester` is intentionally conservative. It does not try to assign a single numeric score to code quality. A change is kept only if it passes hard gates and is easy for a human reviewer to understand.
-
-The default program tells the agent to avoid broad rewrites, preserve user changes, avoid dependency changes unless explicitly allowed, and revert work that is not clearly better.
-
-## Files
+## Commands
 
 ```text
-src/autotester/programs/autotester.md  default agent program
-examples/results.tsv                   example experiment log
+autotester init <repo> [--program <path>] [--force]
+autotester run <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty]
 ```
+
+`--max-attempts` is a runtime instruction injected into the prompt. It is a
+maximum, not a quota; the agent should stop early when only risky or subjective
+changes remain.
+
+## Files in target repos
+
+- `program.md` — repo-specific agent policy.
+- `results.tsv` — local run log. Do not commit unless you explicitly want to.
 
 ## License
 
