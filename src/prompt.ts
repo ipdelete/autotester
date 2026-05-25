@@ -64,6 +64,12 @@ export interface NextAttemptOptions {
   mode?: "optimize" | "bugfix";
 }
 
+export interface BugfixRepairPromptOptions {
+  attemptNumber: number;
+  diagnosticPath: string;
+  reason: string;
+}
+
 export function packageRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
@@ -230,6 +236,11 @@ function attemptProtocol(mode: "optimize" | "bugfix"): string {
 5. STOP after committing. Do not edit results.tsv or harness control files. The
    harness will validate in temp worktrees and tell you whether the bugfix was kept.
 
+If the parent/child proof and targeted test pass but the full gate fails (for
+example, a lint/import-order issue), the harness may give you one repair turn.
+On that repair turn, fix only gate/lint fallout in the declared files and amend
+the same commit so the attempt remains exactly one commit.
+
 Keep searching until the harness stops you. If a hypothesis is speculative or
 not reproducible, abandon it internally and try another. If you truly cannot
 produce a candidate, say so and do NOT commit; HEAD-not-moved is the stop signal.`;
@@ -320,5 +331,24 @@ Recent attempts (most recent last):
 ${recent || "  (none yet)"}
 
 ${instruction}
+`;
+}
+export function buildBugfixRepairPrompt(opts: BugfixRepairPromptOptions): string {
+  return `Bugfix attempt ${opts.attemptNumber} reached the final full-gate step, but the gate failed.
+
+Reason: ${opts.reason}
+Diagnostics file: ${opts.diagnosticPath}
+
+Repair turn rules:
+
+1. Read the diagnostics file to see the gate failure.
+2. Fix only gate/lint/format fallout necessary for the already-committed bugfix.
+3. Do not change the bug hypothesis, repro command, or behavioral fix unless the gate failure proves the fix itself is invalid.
+4. Do not edit program.md, results.tsv, .autotester.json, .autotester/runs/**, or .autotester/attempts/**.
+5. Keep changes limited to the manifest-declared test_files and fix_files.
+6. Amend the existing commit; do not create a second commit:
+       git add <fixed files>
+       git commit --amend --no-edit
+7. Stop after amending. The harness will re-run the parent-fail / child-pass / targeted-test / full-gate validation.
 `;
 }

@@ -157,7 +157,10 @@ The harness keeps the commit only if exactly one commit was made, protected
 harness files were not touched, declared files match the diff, the repro fails
 in a temp worktree at the parent commit, the same repro passes in a temp
 worktree at the child commit, the targeted regression test passes, and the full
-`gate` passes. Validation details are written to `.autotester/attempts/*.json`.
+`gate` passes. If proof + targeted test pass but the full gate fails, the
+harness gives the agent one repair turn to fix lint/format/gate fallout by
+amending the same commit, then revalidates. Validation details are written to
+`.autotester/attempts/*.json`.
 
 ## Files in target repos
 

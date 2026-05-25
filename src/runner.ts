@@ -6,6 +6,7 @@ import {
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
+  buildBugfixRepairPrompt,
   buildFirstAttemptPrompt,
   buildNextAttemptPrompt,
   loadProgram,
@@ -325,10 +326,11 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       let description = manifest?.description ?? "(no description)";
       let status: AttemptStatus;
       let metricValue: number;
+      let attemptedCommit = headAfter;
 
       if (mode === "bugfix") {
         process.stdout.write(`[harness] validating bugfix proof...\n`);
-        const validation = validateBugfixAttempt({
+        let validation = validateBugfixAttempt({
           repo,
           attempt,
           parent: headBefore,
@@ -338,14 +340,70 @@ export async function runAutotester(options: RunOptions): Promise<number> {
           timeoutSec: attemptTimeout,
           verifiedRegressionFixes,
         });
+
+        if (validation.status === "discard" && validation.reason === "full gate failed") {
+          const diagnosticPath = resolve(
+            repo,
+            ".autotester",
+            "attempts",
+            `${String(attempt).padStart(4, "0")}.json`,
+          );
+          process.stdout.write(
+            `[harness] full gate failed after proof passed; giving agent one repair turn\n`,
+          );
+          let repairAccepted: boolean | undefined;
+          await session.prompt(buildBugfixRepairPrompt({
+            attemptNumber: attempt,
+            diagnosticPath,
+            reason: validation.reason,
+          }), {
+            expandPromptTemplates: false,
+            preflightResult: (didSucceed: boolean) => {
+              repairAccepted = didSucceed;
+            },
+          });
+          if (repairAccepted === false) {
+            throw new Error(
+              `Agent repair prompt was rejected before execution ` +
+                `(provider=${providerResolved.value}, model=${modelResolved.value}, ` +
+                `thinking=${thinkingResolved.value ?? "default"}).`,
+            );
+          }
+
+          const repairedHead = headSha(repo);
+          const repairedDelta = commitCount(repo, headBefore, repairedHead);
+          if (repairedDelta !== 1) {
+            validation = {
+              status: "crash",
+              metric: Number.POSITIVE_INFINITY,
+              description: manifest?.description ?? "bugfix repair did not preserve one-commit shape",
+              reason: `repair left ${repairedDelta} commits from parent; expected exactly one amended commit`,
+            };
+          } else {
+            const repairedManifest = consumeAttemptManifest(repo) ?? manifest;
+            validation = validateBugfixAttempt({
+              repo,
+              attempt,
+              parent: headBefore,
+              child: repairedHead,
+              manifest: repairedManifest,
+              gate: frontMatter.gate,
+              timeoutSec: attemptTimeout,
+              verifiedRegressionFixes,
+            });
+          }
+        }
+
         status = validation.status;
         metricValue = validation.metric;
         description = validation.description;
+        const finalHead = headSha(repo);
+        attemptedCommit = finalHead;
         process.stdout.write(`[harness] ${status}: ${validation.reason}\n`);
         if (status === "keep") {
           verifiedRegressionFixes += 1;
           bestMetric = metricValue;
-          lastKeptHead = headAfter;
+          lastKeptHead = finalHead;
           keeps += 1;
         } else {
           resetHard(repo, headBefore);
@@ -397,7 +455,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
         elapsedSec: (Date.now() - t0) / 1000,
         metric: metricValue,
         status,
-        commit: headAfter,
+        commit: attemptedCommit,
         description,
       });
       history.push({ attempt, status, metric: metricValue, description });

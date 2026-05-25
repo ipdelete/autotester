@@ -89,6 +89,11 @@ The harness validates in temp worktrees:
 - targeted regression test passes
 - full gate passes
 
+If the proof and targeted test pass but the full gate fails because of lint,
+formatting, import ordering, or similar gate fallout, the harness may give you
+one repair turn. On that turn, fix only the gate issue in the declared files and
+`git commit --amend --no-edit`; do not create a second commit.
+
 ## Attempt manifest
 
 Before committing, write `.autotester/attempt.json` like:
