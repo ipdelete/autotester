@@ -17,8 +17,9 @@ export interface RunSummary {
   crashes: number;
   blocked: number;
   repairs: number;
+  noFindingStreak?: number;
   model: string;
-  reason: "completed" | "max-attempts" | "time-budget" | "agent-stopped" | "error";
+  reason: "completed" | "max-attempts" | "time-budget" | "agent-stopped" | "no-finding-budget" | "error";
   errorMessage?: string;
 }
 

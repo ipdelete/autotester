@@ -56,6 +56,7 @@ autotester init    <repo> [--program <path>] [--force]
                           [--editable <glob>]... [--readonly <glob>]...
 autotester run     <repo> [--program <path>]
                           [--max-attempts <n>] [--time-budget <seconds>]
+                          [--max-no-finding-attempts <n>]
                           [--attempt-timeout <seconds>] [--allow-dirty]
                           [--tag <name>]
                           [--provider <id>] [--model <pattern>] [--thinking <level>]
@@ -63,7 +64,8 @@ autotester history <repo>
 ```
 
 The loop terminates on whichever comes first: `--max-attempts`,
-`--time-budget`, or the agent declining to commit (its stop signal).
+`--time-budget`, bugfix-mode `--max-no-finding-attempts`, or the agent
+declining to commit in optimize mode (its stop signal).
 `--attempt-timeout` is the wall-clock cap the harness applies to each
 individual `gate` or `metric` shell invocation.
 
@@ -138,7 +140,8 @@ metric = - verified_regression_fixes
 ```
 
 Lower is better: `-3` means the run has found, tested, and fixed three latent
-defects.
+defects. Bugfix mode also supports `--max-no-finding-attempts <n>` (default 3),
+which stops after N consecutive attempts without a kept verified finding.
 
 Bugfix attempts require a richer `.autotester/attempt.json`:
 

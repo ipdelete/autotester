@@ -53,6 +53,8 @@ export interface FirstAttemptOptions {
   timeBudgetSeconds?: number;
   attemptNumber: number;
   mode?: "optimize" | "bugfix";
+  maxNoFindingAttempts?: number;
+  noFindingStreak?: number;
 }
 
 export interface NextAttemptOptions {
@@ -62,6 +64,8 @@ export interface NextAttemptOptions {
   bestMetric: number;
   recent: AttemptHistoryEntry[];
   mode?: "optimize" | "bugfix";
+  maxNoFindingAttempts?: number;
+  noFindingStreak?: number;
 }
 
 export interface BugfixRepairPromptOptions {
@@ -243,7 +247,9 @@ the same commit so the attempt remains exactly one commit.
 
 Keep searching until the harness stops you. If a hypothesis is speculative or
 not reproducible, abandon it internally and try another. If you truly cannot
-produce a candidate, say so and do NOT commit; HEAD-not-moved is the stop signal.`;
+produce a candidate, say so and do NOT commit; in bugfix mode HEAD-not-moved is
+logged as a no-finding attempt and the harness stops only after the no-finding
+budget is exhausted.`;
   }
 
   return `Per-attempt protocol (the harness enforces this; do not deviate):
@@ -280,6 +286,10 @@ export function buildFirstAttemptPrompt(opts: FirstAttemptOptions): string {
   ];
   if (opts.timeBudgetSeconds !== undefined) {
     variables.push(`TIME_BUDGET_SECONDS=${opts.timeBudgetSeconds}`);
+  }
+  if (opts.maxNoFindingAttempts !== undefined) {
+    variables.push(`MAX_NO_FINDING_ATTEMPTS=${opts.maxNoFindingAttempts}`);
+    variables.push(`NO_FINDING_STREAK=${opts.noFindingStreak ?? 0}`);
   }
   const scopeBlock =
     opts.scope && (opts.scope.editable.length > 0 || opts.scope.readonly.length > 0)
@@ -319,13 +329,16 @@ export function buildNextAttemptPrompt(opts: NextAttemptOptions): string {
     opts.remainingSeconds !== undefined
       ? `Remaining: ${opts.remainingAttempts} attempts, ${opts.remainingSeconds}s time budget.`
       : `Remaining: ${opts.remainingAttempts} attempts.`;
+  const noFindingLine = opts.maxNoFindingAttempts !== undefined
+    ? `\nNo-finding streak: ${opts.noFindingStreak ?? 0}/${opts.maxNoFindingAttempts}.`
+    : "";
   const instruction = mode === "bugfix"
     ? "Propose one more focused bugfix, following the per-attempt protocol. Keep searching until the harness stops you; if a hypothesis is not reproducible, try another."
     : "Propose one more focused change, following the per-attempt protocol. If only risky or subjective changes remain, say so in plain text and do NOT commit.";
   return `Attempt ${opts.attemptNumber}.
 
 Current best metric: ${opts.bestMetric}.
-${timeLine}
+${timeLine}${noFindingLine}
 
 Recent attempts (most recent last):
 ${recent || "  (none yet)"}

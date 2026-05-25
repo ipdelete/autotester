@@ -44,6 +44,7 @@ export interface RunOptions {
   program?: string;
   maxAttempts: number;
   timeBudget?: number; // seconds; undefined = no wall-clock cap
+  maxNoFindingAttempts?: number; // bugfix mode only
   allowDirty: boolean;
   allowPush: boolean;
   provider?: string;
@@ -192,6 +193,10 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   if (thinkingResolved.value) console.log(`thinking: ${thinkingResolved.value} (${thinkingResolved.source})`);
   console.log(`mode: ${mode}`);
   console.log(`max attempts: ${options.maxAttempts}`);
+  const maxNoFindingAttempts = mode === "bugfix" ? (options.maxNoFindingAttempts ?? 3) : undefined;
+  if (maxNoFindingAttempts !== undefined) {
+    console.log(`max no-finding attempts: ${maxNoFindingAttempts}`);
+  }
   if (options.timeBudget !== undefined) console.log(`time budget: ${options.timeBudget}s`);
   console.log(`attempt timeout: ${attemptTimeout}s`);
   console.log(`start: ${startHead}`);
@@ -226,6 +231,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   const history: AttemptHistoryEntry[] = [];
   let keeps = 0, discards = 0, crashes = 0, blocked = 0, repairs = 0;
   let verifiedRegressionFixes = 0;
+  let noFindingStreak = 0;
   let reason: RunSummary["reason"] = "completed";
   let errorMessage: string | undefined;
 
@@ -271,6 +277,8 @@ export async function runAutotester(options: RunOptions): Promise<number> {
             timeBudgetSeconds: options.timeBudget,
             attemptNumber: 1,
             mode,
+            maxNoFindingAttempts,
+            noFindingStreak,
           })
         : buildNextAttemptPrompt({
             attemptNumber: attempt,
@@ -279,6 +287,8 @@ export async function runAutotester(options: RunOptions): Promise<number> {
             bestMetric,
             recent: history,
             mode,
+            maxNoFindingAttempts,
+            noFindingStreak,
           });
 
       process.stdout.write(`\n[harness] --- attempt ${attempt}/${options.maxAttempts} (best=${bestMetric}, elapsed=${Math.round(elapsedSec)}s) ---\n`);
@@ -300,6 +310,32 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       const headAfter = headSha(repo);
 
       if (headAfter === headBefore) {
+        if (mode === "bugfix") {
+          noFindingStreak += 1;
+          discards += 1;
+          process.stdout.write(
+            `\n[harness] HEAD did not move; no verified finding (${noFindingStreak}/${maxNoFindingAttempts})\n`,
+          );
+          appendResultsRow(repo, {
+            attempt,
+            elapsedSec: (Date.now() - t0) / 1000,
+            metric: Number.POSITIVE_INFINITY,
+            status: "discard",
+            commit: headBefore,
+            description: "no finding produced",
+          });
+          history.push({
+            attempt,
+            status: "discard",
+            metric: Number.POSITIVE_INFINITY,
+            description: "no finding produced",
+          });
+          if (maxNoFindingAttempts !== undefined && noFindingStreak >= maxNoFindingAttempts) {
+            reason = "no-finding-budget";
+            break;
+          }
+          continue;
+        }
         process.stdout.write(`\n[harness] HEAD did not move; treating as agent stop signal\n`);
         reason = "agent-stopped";
         break;
@@ -319,6 +355,13 @@ export async function runAutotester(options: RunOptions): Promise<number> {
         });
         history.push({ attempt, status: "crash", metric: Number.POSITIVE_INFINITY, description: "attempt made more than one commit" });
         crashes += 1;
+        if (mode === "bugfix") {
+          noFindingStreak += 1;
+          if (maxNoFindingAttempts !== undefined && noFindingStreak >= maxNoFindingAttempts) {
+            reason = "no-finding-budget";
+            break;
+          }
+        }
         continue;
       }
 
@@ -431,9 +474,11 @@ export async function runAutotester(options: RunOptions): Promise<number> {
           bestMetric = metricValue;
           lastKeptHead = finalHead;
           keeps += 1;
+          noFindingStreak = 0;
         } else {
           resetHard(repo, headBefore);
           if (status === "crash") crashes += 1; else discards += 1;
+          noFindingStreak += 1;
         }
       } else {
         // Gate
@@ -486,6 +531,15 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       });
       history.push({ attempt, status, metric: metricValue, description });
 
+      if (
+        mode === "bugfix" &&
+        maxNoFindingAttempts !== undefined &&
+        noFindingStreak >= maxNoFindingAttempts
+      ) {
+        reason = "no-finding-budget";
+        break;
+      }
+
       if (attempt === options.maxAttempts) {
         reason = "max-attempts";
       }
@@ -515,6 +569,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       crashes,
       blocked,
       repairs,
+      noFindingStreak,
       model: modelString,
       reason,
       errorMessage,
@@ -524,7 +579,12 @@ export async function runAutotester(options: RunOptions): Promise<number> {
     console.log("\n\n--- autotester summary ---");
     console.log(`branch: ${branchName}`);
     console.log(`baseline -> best: ${baselineMetricValue} -> ${bestMetric} (Δ ${summary.delta >= 0 ? "+" : ""}${summary.delta})`);
-    console.log(`attempts: ${summary.attempts} (${keeps} keep, ${discards} discard, ${crashes} crash, ${repairs} repaired)`);
+    console.log(
+      `attempts: ${summary.attempts} (` +
+        `${keeps} keep, ${discards} discard, ${crashes} crash, ` +
+        `${repairs} repaired, no-finding streak ${noFindingStreak}` +
+        `)`,
+    );
     console.log(`wall clock: ${Math.round(wallClockSec)}s`);
     console.log(`stop reason: ${reason}`);
     console.log(`last kept HEAD: ${lastKeptHead}`);

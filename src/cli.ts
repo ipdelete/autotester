@@ -118,6 +118,7 @@ Usage:
                             [--editable <glob>]... [--readonly <glob>]...
   autotester run     <repo> [--program <path>]
                             [--max-attempts <n>] [--time-budget <seconds>]
+                            [--max-no-finding-attempts <n>]
                             [--attempt-timeout <seconds>] [--allow-dirty]
                             [--tag <name>]
                             [--provider <id>] [--model <pattern>] [--thinking <level>]
@@ -128,7 +129,7 @@ Commands:
            and install a pre-commit hook enforcing the declared scope.
   run     Drive the agent: harness runs gate/metric, agent proposes commits,
            harness keeps or discards each attempt. Loop terminates on
-           --max-attempts, --time-budget, or agent stop signal.
+           --max-attempts, --time-budget, bugfix no-finding budget, or agent stop signal.
   history  Print the table of past runs recorded in .autotester/runs/.
 `;
 }
@@ -213,6 +214,7 @@ async function main(): Promise<number> {
       program: flagString(parsed.flags, "program"),
       maxAttempts: flagInt(parsed.flags, "max-attempts", 10),
       timeBudget,
+      maxNoFindingAttempts: flagInt(parsed.flags, "max-no-finding-attempts", 3),
       allowDirty: parsed.flags.get("allow-dirty") === true,
       allowPush: parsed.flags.get("push") === true,
       provider: flagString(parsed.flags, "provider"),

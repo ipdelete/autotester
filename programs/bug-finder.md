@@ -68,7 +68,9 @@ Probe cases like:
 
 Keep searching until the harness stops you. If a hypothesis is speculative or
 not reproducible, abandon it internally and try another subsystem. Do not ask
-the human whether to continue.
+the human whether to continue. If you truly cannot produce a candidate, say so
+and do not commit; the harness logs that as a no-finding attempt and stops only
+after the configured no-finding budget is exhausted.
 
 ## What counts as an attempt
 
