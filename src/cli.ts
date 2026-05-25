@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { bundledProgramPath, RESULTS_HEADER } from "./prompt.js";
 import { installPreCommitHook, writeConfig } from "./scope.js";
 import { runAutotester } from "./runner.js";
+import { formatHistoryTable, listRunSummaries } from "./history.js";
 
 interface ParsedArgs {
   command?: string;
@@ -113,16 +114,22 @@ function help(): string {
   return `autotester
 
 Usage:
-  autotester init <repo> [--program <path>] [--force]
-                         [--editable <glob>]... [--readonly <glob>]...
-  autotester run  <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty]
-                         [--tag <name>] [--attempt-timeout <seconds>]
-                         [--provider <id>] [--model <pattern>] [--thinking <level>]
+  autotester init    <repo> [--program <path>] [--force]
+                            [--editable <glob>]... [--readonly <glob>]...
+  autotester run     <repo> [--program <path>]
+                            [--max-attempts <n>] [--time-budget <seconds>]
+                            [--attempt-timeout <seconds>] [--allow-dirty]
+                            [--tag <name>]
+                            [--provider <id>] [--model <pattern>] [--thinking <level>]
+  autotester history <repo>
 
 Commands:
-  init   Copy a program.md, initialize results.tsv, write .autotester.json,
-         and install a pre-commit hook enforcing the declared scope.
-  run    Run a program-driven Pi coding-agent loop in a target repo.
+  init     Copy a program.md, initialize results.tsv, write .autotester.json,
+           and install a pre-commit hook enforcing the declared scope.
+  run     Drive the agent: harness runs gate/metric, agent proposes commits,
+           harness keeps or discards each attempt. Loop terminates on
+           --max-attempts, --time-budget, or agent stop signal.
+  history  Print the table of past runs recorded in .autotester/runs/.
 `;
 }
 
@@ -191,10 +198,21 @@ async function main(): Promise<number> {
   }
 
   if (parsed.command === "run") {
+    const timeBudgetRaw = flagString(parsed.flags, "time-budget");
+    const timeBudget = timeBudgetRaw === undefined
+      ? undefined
+      : (() => {
+          const n = Number.parseInt(timeBudgetRaw, 10);
+          if (!Number.isFinite(n) || n < 1) {
+            throw new Error("--time-budget must be a positive integer (seconds)");
+          }
+          return n;
+        })();
     await runAutotester({
       repo: requireRepo(parsed.positionals),
       program: flagString(parsed.flags, "program"),
       maxAttempts: flagInt(parsed.flags, "max-attempts", 10),
+      timeBudget,
       allowDirty: parsed.flags.get("allow-dirty") === true,
       allowPush: parsed.flags.get("push") === true,
       provider: flagString(parsed.flags, "provider"),
@@ -203,6 +221,13 @@ async function main(): Promise<number> {
       tag: flagString(parsed.flags, "tag"),
       attemptTimeout: flagInt(parsed.flags, "attempt-timeout", 600),
     });
+    return 0;
+  }
+
+  if (parsed.command === "history") {
+    const repo = requireRepo(parsed.positionals);
+    const runs = listRunSummaries(repo);
+    console.log(formatHistoryTable(runs));
     return 0;
   }
 

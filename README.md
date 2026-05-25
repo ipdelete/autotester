@@ -50,44 +50,76 @@ preserve existing work.
 ## Commands
 
 ```text
-autotester init <repo> [--program <path>] [--force]
-                       [--editable <glob>]... [--readonly <glob>]...
-autotester run  <repo> [--program <path>] [--max-attempts <n>] [--allow-dirty]
-                       [--tag <name>] [--attempt-timeout <seconds>]
-                       [--provider <id>] [--model <pattern>] [--thinking <level>]
+autotester init    <repo> [--program <path>] [--force]
+                          [--editable <glob>]... [--readonly <glob>]...
+autotester run     <repo> [--program <path>]
+                          [--max-attempts <n>] [--time-budget <seconds>]
+                          [--attempt-timeout <seconds>] [--allow-dirty]
+                          [--tag <name>]
+                          [--provider <id>] [--model <pattern>] [--thinking <level>]
+autotester history <repo>
 ```
 
+The loop terminates on whichever comes first: `--max-attempts`,
+`--time-budget`, or the agent declining to commit (its stop signal).
+`--attempt-timeout` is the wall-clock cap the harness applies to each
+individual `gate` or `metric` shell invocation.
+
 `--tag <name>` creates a fresh `autotester/<name>` branch from current
-HEAD and refuses to reuse an existing tag. `--attempt-timeout <sec>` is
-injected into the prompt as `ATTEMPT_TIMEOUT` for the program to use when
-wrapping its `GATE_CMD`/`METRIC_CMD` invocations.
+HEAD and refuses to reuse an existing tag.
 
 The model triple is resolved per field with this priority: CLI flag >
 program front matter > built-in default (`github-copilot/claude-opus-4.7`,
-no thinking level). Programs declare their preferred model in optional
-YAML front matter:
+no thinking level).
+
+## Program contract
+
+A `program.md` declares two shell snippets in YAML front matter: a `gate`
+that must exit 0, and a `metric` that prints `metric: <float>` to stdout
+(lower is better). The harness — not the agent — runs both between
+attempts and decides keep/discard/crash. Example:
 
 ```yaml
 ---
 provider: github-copilot
 model: claude-opus-4.7
-thinking: medium
+gate: |
+  set -e
+  uv run pytest -q
+  uv run ruff check .
+metric: |
+  set -e
+  echo "metric: $(cloc --quiet --csv src 2>/dev/null \
+    | awk -F, 'NR>2 && $1!="SUM" {sum+=$5} END {print sum+0}')"
 ---
+
+# program body: what kinds of changes to propose, what's out of bounds.
 ```
 
-`--max-attempts` is a runtime instruction injected into the prompt. It is a
-maximum, not a quota; the agent should stop early when only risky or subjective
-changes remain.
+Per-attempt protocol enforced by the harness:
+
+1. Agent edits files.
+2. Agent writes `.autotester/attempt.json` with `{"description": "..."}`.
+3. Agent commits.
+4. Harness runs `gate` then `metric`, appends one row to `results.tsv`,
+   and either keeps the commit (metric strictly improved) or `git
+   reset --hard`s it.
+5. If HEAD doesn't move after a turn, the harness treats it as the
+   agent's stop signal and ends the run.
 
 ## Files in target repos
 
-- `program.md` — repo-specific agent policy (optional YAML front matter for
-  provider/model/thinking).
-- `results.tsv` — local run log. Header is
-  `commit\tmetric\tstatus\tcategory\tdescription`. Do not commit unless you
-  explicitly want to.
-- `.autotester.json` — scope declaration (only present when `init` was given
-  `--editable`/`--readonly`).
+- `program.md` — repo-specific agent policy and gate/metric contract.
+- `results.tsv` — one row per attempt. Header is
+  `attempt\telapsed_s\tmetric\tstatus\tcommit\tdescription`. `commit` is
+  always the attempted SHA (reflog-recoverable even when status is
+  `discard` or `crash`).
+- `.autotester.json` — scope declaration (only present when `init` was
+  given `--editable`/`--readonly`).
+- `.autotester/runs/*.json` — one machine-readable summary per run, used
+  by `autotester history`.
+- `.autotester/attempt.json` — transient; the agent writes it before each
+  commit, the harness consumes it.
 - `.git/hooks/pre-commit` — installed by `init` when scope is declared.
   Rejects staged paths that violate the scope.
 

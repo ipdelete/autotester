@@ -33,6 +33,31 @@ describe("parseFrontMatter", () => {
     expect(frontMatter.model).toBe("anthropic/claude-opus-4-7");
   });
 
+  it("parses block scalars for gate and metric", () => {
+    const source = [
+      "---",
+      "provider: github-copilot",
+      "gate: |",
+      "  set -e",
+      "  pytest -q",
+      "metric: |",
+      "  echo 'metric: 42'",
+      "---",
+      "body",
+    ].join("\n");
+    const { body, frontMatter } = parseFrontMatter(source);
+    expect(frontMatter.provider).toBe("github-copilot");
+    expect(frontMatter.gate).toBe("set -e\npytest -q");
+    expect(frontMatter.metric).toBe("echo 'metric: 42'");
+    expect(body).toBe("body");
+  });
+
+  it("accepts an inline shell command for gate", () => {
+    const source = `---\ngate: pytest -q\nmetric: echo metric: 0\n---\nbody`;
+    const { frontMatter } = parseFrontMatter(source);
+    expect(frontMatter.gate).toBe("pytest -q");
+  });
+
   it("rejects unknown keys", () => {
     const source = `---\ntemperature: 0.7\n---\nbody`;
     expect(() => parseFrontMatter(source)).toThrow(/unknown key 'temperature'/);

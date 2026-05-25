@@ -62,6 +62,17 @@ export function createBranch(repo: string, name: string): void {
   git(repo, ["checkout", "-b", name]);
 }
 
+export function headSha(repo: string, length = 7): string {
+  return git(repo, ["rev-parse", `--short=${length}`, "HEAD"]);
+}
+
+export function resetHard(repo: string, ref: string): void {
+  git(repo, ["reset", "--hard", ref]);
+  // Also clean untracked files that the attempt left behind (e.g. stray
+  // build artifacts), but preserve our own .autotester/ and results.tsv.
+  git(repo, ["clean", "-fd", "-e", ".autotester/", "-e", "results.tsv", "-e", "program.md"]);
+}
+
 export function summarizeGit(repo: string, since?: string): GitSummary {
   const branch = currentBranch(repo);
   const status = gitStatus(repo);

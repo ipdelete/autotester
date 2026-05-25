@@ -1,143 +1,87 @@
 ---
 provider: github-copilot
 model: claude-opus-4.7
+gate: |
+  set -e
+  uv run pytest -q
+  uv run ruff check .
+  uv run ty check
+  # Public API invariant: hash signatures of names in ttasks.__all__ and
+  # compare against the snapshot taken at the first run. The snapshot file
+  # is bootstrapped on the first pass and then frozen.
+  uv run python - <<'PY'
+  import hashlib, inspect, json, os, pathlib, sys
+  import ttasks  # noqa
+  parts = []
+  for name in getattr(ttasks, "__all__", []):
+      obj = getattr(ttasks, name)
+      try:
+          sig = str(inspect.signature(obj))
+      except (TypeError, ValueError):
+          sig = "<no-signature>"
+      parts.append(f"{name}{sig}")
+  current = hashlib.sha256("\n".join(parts).encode()).hexdigest()
+  snap = pathlib.Path(".autotester.api-hash")
+  if not snap.exists():
+      snap.write_text(current + "\n")
+      print(f"api-hash bootstrapped: {current[:12]}")
+  else:
+      expected = snap.read_text().strip()
+      if expected != current:
+          print(f"api-hash mismatch: expected {expected[:12]}, got {current[:12]}", file=sys.stderr)
+          sys.exit(1)
+      print(f"api-hash ok: {current[:12]}")
+  PY
+metric: |
+  set -e
+  uv run python - <<'PY'
+  import pathlib
+  n = 0
+  for p in pathlib.Path("src/ttasks").rglob("*.py"):
+      for line in p.read_text().splitlines():
+          s = line.strip()
+          if s and not s.startswith("#"):
+              n += 1
+  print(f"metric: {n}")
+  PY
 ---
 
 # ttasks autotester program
 
-You are an autonomous maintenance engineer for `ttasks`, a Python task
-ledger, executor, store, and DAG workflow library. Your goal is to make the
-existing code more obviously correct and simpler while preserving the public
-API and documented behavior, judged by a single numeric metric.
+The harness runs gate and metric. The gate ensures (a) tests pass, (b)
+`ruff` is clean, (c) `ty` type-checks, and (d) the public API hash for
+`ttasks.__all__` matches the snapshot in `.autotester.api-hash`. The
+metric is `cloc` SLOC of `src/ttasks/` only.
 
-## Run variables (injected by the harness)
+## What to optimize
 
-- `BRANCH` — the current branch (the harness creates `autotester/<tag>` when
-  `--tag` is set; otherwise the existing branch).
-- `ATTEMPT_TIMEOUT` — per-attempt wall-clock budget in seconds (default 600).
-- `MAX_ATTEMPTS` — upper bound on attempts.
+Lower the SLOC of `src/ttasks/` without changing the public API and
+without breaking the gate. The snapshot file `.autotester.api-hash` is
+created on the first gate run; do not edit or delete it.
 
-## Setup (run once at the start of the branch)
+## Allowed kinds of change
 
-1. `git status` — confirm a clean working tree.
-2. **Snapshot the public-API hash.** Compute and stash it in
-   `.autotester.api-hash` (not committed — the pre-commit hook will block
-   it from being staged into `src/ttasks/`). Use:
+- **Simplify**: replace bespoke loops with comprehensions or stdlib
+  helpers where the result is no less readable.
+- **Deduplicate**: merge handlers, factories, or branches that do the same
+  thing under different names.
+- **Compact**: combine adjacent statements when no clarity is lost.
+- **Inline**: collapse one-shot helpers that obscure rather than clarify.
 
-   ```sh
-   uv run python -c '
-   import hashlib, inspect, json, ttasks
-   api = {}
-   for name in sorted(ttasks.__all__):
-       obj = getattr(ttasks, name)
-       try:
-           api[name] = str(inspect.signature(obj))
-       except (TypeError, ValueError):
-           api[name] = repr(type(obj))
-   print(hashlib.sha256(json.dumps(api, sort_keys=True).encode()).hexdigest()[:12])
-   ' > .autotester.api-hash
-   ```
+## Disallowed kinds of change
 
-   This file is the ground truth for the API invariant. Recompute on every
-   gate run; any mismatch means the gate fails.
-3. Run `GATE_CMD`. It must exit 0 on the baseline.
-4. Run `METRIC_CMD`. Record as `BASELINE_METRIC`. Append a `keep` baseline
-   row to `results.tsv` with the current commit hash.
+- Touching anything outside `src/ttasks/` (the pre-commit hook will reject
+  it; don't try).
+- Renaming, adding, or removing anything in `ttasks.__all__` or changing
+  any public signature (the api-hash gate will reject it).
+- Behavior changes the test suite doesn't cover but a user might rely on
+  (be conservative — when in doubt, leave it).
+- Reformatting, quote-style churn, comment-deletion sprees.
 
-## The metric contract
+## Attempt protocol
 
-**`GATE_CMD`** — all of the following must exit 0:
-
-```sh
-timeout ${ATTEMPT_TIMEOUT}s uv run pytest -q \
-  && timeout ${ATTEMPT_TIMEOUT}s uv run ruff check . \
-  && timeout ${ATTEMPT_TIMEOUT}s uv run ty check \
-  && current_hash=$(uv run python -c '
-import hashlib, inspect, json, ttasks
-api = {}
-for name in sorted(ttasks.__all__):
-    obj = getattr(ttasks, name)
-    try: api[name] = str(inspect.signature(obj))
-    except (TypeError, ValueError): api[name] = repr(type(obj))
-print(hashlib.sha256(json.dumps(api, sort_keys=True).encode()).hexdigest()[:12])
-') \
-  && [ "$current_hash" = "$(cat .autotester.api-hash)" ]
-```
-
-The default `pytest` invocation already excludes the `live` marker (see
-`pyproject.toml`). Do not run live tests.
-
-**`METRIC_CMD`** — Python SLOC of `src/ttasks/` only (lower is better):
-
-```sh
-sloc=$(cloc --quiet --csv --include-lang=Python src/ttasks 2>/dev/null \
-  | awk -F, '/SUM/{print $5}')
-# Fallback if cloc is unavailable.
-if [ -z "$sloc" ]; then
-  sloc=$(git ls-files 'src/ttasks/*.py' | xargs grep -cv '^\s*\(#\|$\)' \
-    | awk -F: '{s+=$2} END {print s}')
-fi
-echo "metric: ${sloc:-inf}"
-```
-
-**Composite rule:**
-
-```
-effective_metric = METRIC_CMD output if GATE_CMD passes else inf
-```
-
-Every gate/metric run is wrapped in `timeout ${ATTEMPT_TIMEOUT}s`. A timeout
-counts as `effective_metric = inf` and `status = crash`.
-
-## The experiment loop
-
-Repeat up to `MAX_ATTEMPTS` times:
-
-1. **Pick a change.** Prefer this order:
-   1. `bug-fix` — fix a real bug. Add or update a test that reproduces it.
-   2. `dead-code` — remove code proven unused by grep and tests.
-   3. `deduplicate` — collapse duplicate internal logic.
-   4. `state-machine` — use the existing task lifecycle state machine more
-      consistently.
-   5. `simplify` — simplify internal code without changing behavior.
-   6. `type-safety` — tighten types in a way `ty check` can verify.
-2. **Make the change** in a single commit on `BRANCH`. One internal concern
-   per commit. The pre-commit hook restricts edits to `src/ttasks/**`; if
-   you genuinely need a test change, stage it separately and commit it
-   first (`git commit --no-verify` is only for the human, not for you).
-3. **Validate.** Run `GATE_CMD`. On non-zero or timeout:
-   `git reset --hard HEAD~1`; append `status=crash, metric=inf`; continue.
-4. **Measure.** Run `METRIC_CMD`; parse `metric:` line.
-5. **Decide.**
-   - `new_metric < best_metric_so_far`: keep the commit, update best.
-   - else: `git reset --hard HEAD~1`, status `discard`.
-6. **Log.** Append one row to `results.tsv` for every attempt.
-
-Stop early when only cosmetic, risky, or subjective changes remain.
-
-## Hard rules
-
-- Do not change the public API surface. Enforced by the API-hash gate.
-- Do not change SQLite schema or persistence format unless fixing a
-  confirmed bug; if so, add a migration and a test.
-- Do not add features.
-- Do not add dependencies.
-- Do not modify `pyproject.toml` beyond what a refactor strictly requires.
-- Do not touch generated docs or build artifacts.
-- Do not push to any remote.
-- Do not commit `program.md`, `results.tsv`, `.autotester.json`, or
-  `.autotester.api-hash`.
-- Respect the scope block injected by the harness. The pre-commit hook
-  rejects out-of-scope commits regardless.
-
-## `results.tsv` format
-
-```
-commit	metric	status	category	description
-```
-
-- `commit` — short hash (7). Pre-attempt hash for `discard`/`crash`.
-- `metric` — float (lower is better) or `inf` for crashes.
-- `status` — `keep`, `discard`, `crash`.
-- `category` — one of the categories listed above.
-- `description` — one short line, no tabs or newlines.
+The harness will tell you the current best metric each turn. To make an
+attempt: edit files in `src/ttasks/`, write `.autotester/attempt.json`
+with a short description, then `git commit`. Do not run gate or metric
+yourself; the harness will. If only risky/subjective changes remain, say
+so in plain text and don't commit — the harness will stop.
