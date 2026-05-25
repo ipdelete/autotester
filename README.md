@@ -160,7 +160,9 @@ worktree at the child commit, the targeted regression test passes, and the full
 `gate` passes. If proof + targeted test pass but the full gate fails, the
 harness gives the agent one repair turn to fix lint/format/gate fallout by
 amending the same commit, then revalidates. Validation details are written to
-`.autotester/attempts/*.json`.
+`.autotester/attempts/*.json`, including whether repair was used and the
+pre-repair failure details. Harness shell commands set `UV_LINK_MODE=copy` by
+default to keep uv temp-worktree diagnostics quiet.
 
 ## Files in target repos
 

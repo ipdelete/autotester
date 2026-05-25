@@ -28,6 +28,10 @@ export function runShell(repo: string, script: string, timeoutSec: number): Gate
     encoding: "utf8",
     timeout: timeoutSec * 1000,
     maxBuffer: 16 * 1024 * 1024,
+    env: {
+      ...process.env,
+      UV_LINK_MODE: process.env.UV_LINK_MODE ?? "copy",
+    },
   });
   const durationMs = Date.now() - start;
   const timedOut = res.signal === "SIGTERM" || (res.error as NodeJS.ErrnoException | null)?.code === "ETIMEDOUT";

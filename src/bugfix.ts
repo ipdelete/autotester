@@ -19,6 +19,7 @@ export interface BugfixValidationOptions {
   gate: string;
   timeoutSec: number;
   verifiedRegressionFixes: number;
+  repairs?: RepairRecord[];
 }
 
 export interface BugfixValidationResult {
@@ -26,6 +27,17 @@ export interface BugfixValidationResult {
   metric: number;
   description: string;
   reason: string;
+  diagnostic: AttemptDiagnostic;
+}
+
+export interface RepairRecord {
+  trigger: string;
+  before: AttemptDiagnostic;
+  after?: {
+    status: AttemptStatus;
+    reason: string;
+    child: string;
+  };
 }
 
 interface CommandDiag {
@@ -36,7 +48,7 @@ interface CommandDiag {
   stderrTail: string;
 }
 
-interface AttemptDiagnostic {
+export interface AttemptDiagnostic {
   attempt: number;
   status: AttemptStatus;
   reason: string;
@@ -45,6 +57,9 @@ interface AttemptDiagnostic {
   description: string;
   changedFiles?: string[];
   manifest?: AttemptManifest;
+  repaired: boolean;
+  repairCount: number;
+  repairs: RepairRecord[];
   commands: {
     parent_repro?: CommandDiag;
     child_repro?: CommandDiag;
@@ -100,7 +115,7 @@ function diag(r: GateResult): CommandDiag {
   };
 }
 
-function writeDiagnostic(repo: string, diagnostic: AttemptDiagnostic): void {
+export function writeBugfixDiagnostic(repo: string, diagnostic: AttemptDiagnostic): void {
   const dir = resolve(repo, ".autotester", "attempts");
   mkdirSync(dir, { recursive: true });
   writeFileSync(
@@ -118,8 +133,8 @@ function result(
 ): BugfixValidationResult {
   diagnostic.status = status;
   diagnostic.reason = reason;
-  writeDiagnostic(repo, diagnostic);
-  return { status, metric, reason, description: diagnostic.description };
+  writeBugfixDiagnostic(repo, diagnostic);
+  return { status, metric, reason, description: diagnostic.description, diagnostic };
 }
 
 export function validateBugfixAttempt(options: BugfixValidationOptions): BugfixValidationResult {
@@ -131,6 +146,9 @@ export function validateBugfixAttempt(options: BugfixValidationOptions): BugfixV
     child: options.child,
     description: options.manifest?.description ?? "(invalid or missing bugfix manifest)",
     manifest: options.manifest,
+    repaired: (options.repairs?.length ?? 0) > 0,
+    repairCount: options.repairs?.length ?? 0,
+    repairs: options.repairs ?? [],
     commands: {},
   };
 

@@ -67,6 +67,9 @@ describe("bugfix validation helpers", () => {
     });
     expect(`${res.status}: ${res.reason}`).toBe("keep: verified defect retired");
     expect(res.metric).toBe(-1);
+    expect(res.diagnostic.repaired).toBe(false);
+    expect(res.diagnostic.repairCount).toBe(0);
+    expect(res.diagnostic.repairs).toEqual([]);
   });
 
   it("discards when parent repro already passes", () => {

@@ -1,556 +1,314 @@
-# Plan: add `bug-finder.md` with deterministic bugfix validation mode
+# Plan: polish bug-finder repair observability
+
+## Context
+
+The bug-finder max-2 run on `ianphil/ttasks` worked:
+
+- Attempt 1 found a documented SQLite storage import-path bug.
+- The parent/child proof and targeted test passed.
+- The full gate failed initially, so the new repair turn triggered.
+- The agent amended the same commit.
+- Revalidation passed and the commit was kept.
+- Attempt 2 found and fixed a blocked-task retry/no-handler bug.
+- Final metric: `0 -> -2` verified defect retirements.
+
+This validates the core `mode: bugfix` loop. The remaining improvements are not architectural; they are observability/polish.
+
+## PR note from the run
+
+`ianphil/ttasks` is a fork of `ipdelete/ttasks`.
+
+The PR I created was:
+
+```text
+https://github.com/ianphil/ttasks/pull/1
+```
+
+That targets the fork repo itself. If the intended contribution target is upstream, the correct PR shape is instead:
+
+```bash
+gh pr create \
+  --repo ipdelete/ttasks \
+  --base master \
+  --head ianphil:autotester/bug2-1701
+```
+
+No autotester code change is planned for PR publishing right now; this note is just to avoid confusion.
 
 ## Goal
 
-Add a new starter template, `programs/bug-finder.md`, for an autoresearch-style QA loop:
+Make bug-finder repair turns more transparent without changing the core loop.
 
-1. Learn how the system is meant to be used.
-2. Probe unexpected but plausible usage.
-3. Find one real latent bug.
-4. Add a regression test.
-5. Fix the bug.
-6. Commit exactly one test+fix commit.
-7. Let the harness prove the bug existed before and is fixed now.
+Specifically:
 
-Keep the existing starter-template workflow:
+1. Preserve pre-repair diagnostics instead of overwriting them.
+2. Mark repaired attempts in structured diagnostics.
+3. Reduce noisy `uv` hardlink warnings in temp worktree validation by setting `UV_LINK_MODE=copy` in harness shell commands.
+4. Track and report repair count in run summary output/JSON.
 
-- No roles system.
-- No repo card.
-- No template composition.
-- `autotester init <repo> --program programs/bug-finder.md` copies the starter into `<repo>/program.md`.
-- User edits `<repo>/program.md` before running.
+These are small changes. No new dependencies. No changes to `program.md` workflow. No publish/PR automation.
 
-This adds one harness validation mode, `mode: bugfix`, beside the current default optimization mode.
+## Change 1 — Preserve repair diagnostics
 
-## Autoresearch alignment
+### Current behavior
 
-This should preserve the important autoresearch discipline:
+`validateBugfixAttempt()` writes:
 
 ```text
-agent proposes experiment -> deterministic evaluator scores it -> branch advances only on verified improvement -> results.tsv logs the trajectory
+.autotester/attempts/0001.json
 ```
 
-Mapping:
+When a full-gate failure triggers a repair turn, the first validation writes a failed diagnostic, then revalidation writes to the same path and overwrites it with the final keep result.
 
-| autoresearch | bug-finder |
-| --- | --- |
-| experiment = training-code change | experiment = one bug hypothesis + regression test + fix |
-| evaluator = `uv run train.py` | evaluator = parent-fail / child-pass / targeted-test-pass / gate-pass harness |
-| metric = val_bpb, lower better | metric = `-verified_regression_fixes`, lower better |
-| keep if model improves | keep if latent defect is proved and retired |
-| reset if worse/crash | reset if not proven |
+This loses useful information:
 
-The LLM proposes. The harness adjudicates.
+- the first full-gate failure reason,
+- the exact failed gate output,
+- why the repair turn was triggered.
 
-## Harness vs LLM ownership
+### Desired behavior
 
-### Harness owns
+Keep both phases.
 
-Anything objective, mechanical, security/safety-critical, or easy for the model to silently get wrong:
-
-- Front-matter mode validation.
-- Attempt boundary: parent SHA before turn, child SHA after turn.
-- Exactly-one-commit check.
-- Manifest parsing and required-field validation.
-- Protected-file checks.
-- Changed-file checks against manifest-declared files.
-- Parent and child temp worktree creation/cleanup.
-- Parent repro must fail.
-- Optional parent failure pattern must match.
-- Child repro must pass.
-- Targeted regression test must pass.
-- Full gate must pass.
-- Metric computation: `-verified_regression_fixes`.
-- `results.tsv` append.
-- Per-attempt diagnostics JSON.
-- Reset/clean on reject.
-
-### LLM owns
-
-Judgment/search work:
-
-- Learn public usage from README/docs/examples/tests/API/CLI help.
-- Generate bug hypotheses.
-- Design the inline reproduction command.
-- Add a regression test.
-- Make a minimal fix.
-- Write `.autotester/attempt.json`.
-- Commit exactly the test+fix files.
-
-The LLM never decides whether the attempt counts. It only supplies a candidate proof.
-
-## Metric
-
-Use a lower-is-better negative cumulative metric:
+Recommended file layout:
 
 ```text
-metric = - verified_regression_fixes
+.autotester/attempts/0001.json
 ```
 
-Human-facing name:
-
-```text
-verified defect retirements
-```
-
-Meaning:
-
-- Baseline: `metric: 0`.
-- One accepted bugfix: `metric: -1`.
-- Two accepted bugfixes: `metric: -2`.
-
-This does **not** mean the repo has negative bugs. It means the run has retired N previously unknown defects while keeping the repo in a known-good state.
-
-A kept bugfix increments the count by exactly 1. Do not weight by severity in v1; severity is subjective and gameable.
-
-Rejected bugfix attempts use `metric = inf`, consistent with failed-gate semantics.
-
-## Bugfix acceptance rule
-
-A bugfix attempt is kept iff all of these are true:
-
-1. Agent made exactly one commit since the attempt started.
-2. `.autotester/attempt.json` exists and includes required bugfix fields:
-   - `description`
-   - `repro_command`
-   - `test_command`
-   - `test_files`
-   - `fix_files`
-3. The child commit does not touch protected harness files.
-4. The child commit changes every file listed in `test_files` and `fix_files`.
-5. The child commit changes no files outside `test_files ∪ fix_files`.
-6. `repro_command` fails in a temp worktree checked out at the parent commit.
-7. Optional `parent_failure_pattern`, if present, matches parent repro output.
-8. `repro_command` passes in a temp worktree checked out at the child commit.
-9. `test_command` passes in the child worktree.
-10. Program front-matter `gate` passes in the child worktree.
-
-If all pass:
-
-- Keep the main repo at the child commit.
-- Increment `verified_regression_fixes`.
-- Append a row with `metric = -verified_regression_fixes`.
-
-If any check fails:
-
-- Append a row with `metric = inf`.
-- Reset the main repo to the parent commit.
-- Mark status `discard` or `crash` depending on failure type.
-
-## Status classification
-
-| Failure | Status | Reason |
-| --- | --- | --- |
-| No commit | stop | Agent stop signal. |
-| More than one commit | `crash` | Protocol violation. |
-| Missing/invalid manifest | `crash` | Protocol violation. |
-| Missing `test_files`/`fix_files` | `crash` | Cannot verify commit shape. |
-| Protected file edited | `crash` | Harness control file modification. |
-| Manifest file not changed | `crash` | Manifest lied or wrong file listed. |
-| Unlisted file changed | `crash` | Attempt is not scoped to declared test+fix. |
-| Parent repro times out/infrastructure failure | `crash` | Cannot prove parent behavior. |
-| Parent repro passes | `discard` | Not proven to be a pre-existing bug. |
-| Parent repro fails but pattern does not match | `discard` | Failure is not the claimed failure. |
-| Child repro fails | `discard` | Fix does not satisfy reproduction. |
-| Child targeted test fails | `discard` | Regression test does not pass. |
-| Full child gate fails | `discard` | Fix regresses the repo. |
-| Any unexpected harness exception | `crash` | Unexpected validation failure. |
-
-## Why use `repro_command` instead of only the new test?
-
-The committed regression test does not exist on the parent commit. Running the new test path against the parent would fail because the file is missing, not necessarily because the bug exists.
-
-So the agent must provide an inline reproduction command that works against both parent and child:
-
-- On parent: exits nonzero because the bug exists.
-- On child: exits zero because the bug is fixed.
-
-The committed regression test is still required to keep the bug fixed in the future.
-
-## Attempt manifest schema
-
-Existing optimize mode manifest:
-
-```json
-{"description": "short summary"}
-```
-
-Bugfix mode manifest:
+with a single combined diagnostic:
 
 ```json
 {
-  "description": "Fix empty input crash in parser",
-  "repro_command": "python - <<'PY'\n...\nPY",
-  "test_command": "pytest tests/test_parser.py::test_empty_input -q",
-  "test_files": ["tests/test_parser.py"],
-  "fix_files": ["src/parser.py"],
-  "parent_failure_pattern": "ValueError|AssertionError"
+  "attempt": 1,
+  "status": "keep",
+  "reason": "verified defect retired",
+  "repaired": true,
+  "parent": "...",
+  "child": "...",
+  "description": "...",
+  "changedFiles": [...],
+  "manifest": {...},
+  "commands": {...final validation...},
+  "repairs": [
+    {
+      "trigger": "full gate failed",
+      "before": {
+        "status": "discard",
+        "reason": "full gate failed",
+        "child": "pre-amend-sha",
+        "commands": {...initial failed validation...}
+      },
+      "after": {
+        "status": "keep",
+        "reason": "verified defect retired",
+        "child": "post-amend-sha"
+      }
+    }
+  ]
 }
 ```
 
-Required in bugfix mode:
+Alternative file layout:
 
-- `description`: one-line human summary.
-- `repro_command`: inline command that fails on parent and passes on child.
-- `test_command`: command targeting the committed regression test.
-- `test_files`: array of test files changed/added by the commit.
-- `fix_files`: array of implementation/config files changed by the fix.
+```text
+.autotester/attempts/0001.initial.json
+.autotester/attempts/0001.repair.json
+.autotester/attempts/0001.json
+```
 
-Optional:
+Recommendation: use the single combined `repairs` array. It keeps `0001.json` as the canonical per-attempt file and avoids extra lookup rules.
 
-- `parent_failure_pattern`: regex matched against parent repro stdout+stderr. Useful to prove the parent failed for the claimed reason rather than a syntax/import/setup error.
+### Implementation approach
 
-Potential future fields, not used in v1:
+- Export or add a helper in `src/bugfix.ts` to let the runner capture diagnostics without immediately losing the first one.
+- Minimal path:
+  - Add an optional `diagnosticSuffix` or `writeDiagnostic` option to `validateBugfixAttempt()`.
+  - First validation on a possible repair writes/returns diagnostic object.
+  - Revalidation writes final canonical diagnostic including `repairs`.
+- Better path:
+  - Change `validateBugfixAttempt()` to return `{ result, diagnostic }` and let runner write diagnostics.
+  - This is slightly cleaner but a little larger.
+
+Recommendation: keep scope small. Add optional `repairOf?: AttemptDiagnostic` / `repairs?: ...` support inside `validateBugfixAttempt()` and a tiny `mergeRepairDiagnostic()` helper.
+
+## Change 2 — Mark repaired attempts
+
+### Desired fields
+
+Add to bugfix diagnostics:
 
 ```json
 {
-  "severity": "low|medium|high",
-  "area": "parser"
+  "repaired": true,
+  "repairCount": 1
 }
 ```
 
-Do not weight the metric by these fields in v1.
-
-## Protected files
-
-Reject bugfix commits touching harness control files:
-
-- `program.md`
-- `results.tsv`
-- `.autotester.json`
-- `.autotester/attempt.json`
-- `.autotester/runs/**`
-- `.autotester/attempts/**`
-
-This should probably become a general harness rule for all modes later, but implement/enforce it for bugfix mode first.
-
-## Harness design
-
-### Front matter
-
-Add supported key:
-
-```yaml
-mode: optimize | bugfix
-```
-
-Default when omitted:
-
-```yaml
-mode: optimize
-```
-
-Validation:
-
-- `optimize` requires `gate` and `metric`.
-- `bugfix` requires `gate`; `metric` is optional/ignored because the harness supplies `-verified_regression_fixes`.
-- Unknown mode is a startup error.
-
-### Runner branching
-
-Current loop validates attempts with:
-
-```text
-gate passes && metric improves
-```
-
-New shape:
-
-```text
-if mode == optimize:
-  existing gate + metric improvement path
-else if mode == bugfix:
-  regression-proof path
-```
-
-### Two temp worktrees
-
-Do validation in temp worktrees so repro/test/gate side effects never affect the main repo:
-
-1. `parent = HEAD before agent turn`.
-2. Agent commits; `child = HEAD after agent turn`.
-3. Create temp detached worktree at parent:
-
-```bash
-git worktree add --detach <parent_tmpdir> <parent>
-```
-
-4. Create temp detached worktree at child:
-
-```bash
-git worktree add --detach <child_tmpdir> <child>
-```
-
-5. Run `repro_command` in parent worktree, expect failure.
-6. Run `repro_command` in child worktree, expect success.
-7. Run `test_command` in child worktree, expect success.
-8. Run `gate` in child worktree, expect success.
-9. Remove both worktrees in `finally`:
-
-```bash
-git worktree remove --force <tmpdir>
-```
-
-Use existing `attemptTimeout` for each shell command.
-
-Do not copy untracked files into worktrees. The repro/test/gate must be self-contained from a clean checkout plus normal dependency manager behavior.
-
-### Commit count
-
-Require exactly one commit per attempt:
-
-```bash
-git rev-list --count <parent>..HEAD
-```
-
-- Count 0: agent stop signal.
-- Count 1: continue validation.
-- Count >1: `crash`, protocol violation, reset to parent.
-
-### Changed-file validation
-
-Compute changed files:
-
-```bash
-git diff --name-only <parent>..<child>
-```
-
-Then:
-
-- reject if any protected file changed,
-- reject if any `test_files` entry did not change,
-- reject if any `fix_files` entry did not change,
-- reject if any changed file is not listed in `test_files ∪ fix_files`.
-
-This makes the attempt auditable: one bug, one declared regression test set, one declared fix set.
-
-### Per-attempt diagnostics
-
-Write structured validation diagnostics for every bugfix attempt:
-
-```text
-.autotester/attempts/<attempt>.json
-```
-
-Example:
+For attempts that did not repair:
 
 ```json
 {
-  "attempt": 2,
-  "status": "discard",
-  "reason": "parent-repro-passed",
-  "parent": "abc1234",
-  "child": "def5678",
-  "description": "duplicate-id repro",
-  "commands": {
-    "parent_repro": {"exitCode": 0, "durationMs": 120, "stdoutTail": "...", "stderrTail": "..."},
-    "child_repro": null,
-    "targeted_test": null,
-    "gate": null
-  }
+  "repaired": false,
+  "repairCount": 0
 }
 ```
 
-Keep `results.tsv` compact; diagnostics are for audit/debugging.
+This lets humans and future tooling distinguish:
 
-### Results rows
+- clean keep,
+- keep-after-repair,
+- discard-after-repair.
 
-Keep existing TSV header:
+### Results TSV
+
+Do **not** add a TSV column. Keep:
 
 ```text
 attempt  elapsed_s  metric  status  commit  description
 ```
 
-For bugfix mode:
+`results.tsv` remains compact. Diagnostics carry repair detail.
 
-- Baseline row: metric `0`, status `keep`, commit start SHA.
-- Kept attempt N: metric `-N`, status `keep`, commit child SHA.
-- Rejected attempts: metric `inf`, status `discard`/`crash`, commit attempted child SHA.
+## Change 3 — Set `UV_LINK_MODE=copy` for harness shell commands
 
-Example:
+### Problem
+
+Temp worktree validation repeatedly emits warnings like:
 
 ```text
-attempt elapsed_s metric status  commit  description
-0       4         0      keep    c763261 initial baseline
-1       180       -1     keep    a1b2c3d fix empty input crash in parser
-2       310       inf    discard d4e5f6a duplicate-id repro passed on parent
-3       515       -2     keep    987abcd fix cancellation leaving executor blocked
+warning: Failed to hardlink files; falling back to full copy.
+If this is intentional, set `export UV_LINK_MODE=copy` ...
 ```
 
-## `programs/bug-finder.md` starter
+This clutters diagnostics and logs.
 
-Front matter:
+### Desired behavior
 
-```yaml
----
-provider: github-copilot
-model: gpt-5.5
-thinking: medium
-mode: bugfix
-gate: |
-  set -e
-  # TODO: Replace with your repo's correctness gate.
-  # Python/uv:
-  #   uv run pytest -q
-  #   uv run ruff check .
-  #   uv run ty check
-  # Node:
-  #   npm test
-  #   npm run lint
-  echo "TODO: edit program.md and set a real gate command" >&2
-  exit 1
-baseline_description: initial baseline (0 verified defect retirements)
----
+When the harness runs shell commands through `runShell()`, set:
+
+```text
+UV_LINK_MODE=copy
 ```
 
-No `metric` block required.
+unless the user already set it.
 
-Body should instruct the agent to:
+### Implementation
 
-- Think like a QA tester.
-- Keep searching until the harness stops you. Do not ask the human whether to continue.
-- If a hypothesis is speculative or not reproducible, abandon it internally and try another subsystem.
-- Learn public usage from README, docs, examples, tests, CLI help, public APIs.
-- Identify core domain objects and lifecycle operations.
-- Probe unexpected but plausible usage:
-  - empty inputs
-  - malformed inputs
-  - duplicate IDs/names
-  - deeply nested or complex structures
-  - graph cycles/disconnected graphs/dependency issues
-  - persistence round trips
-  - cancellation/interruption
-  - repeated calls/idempotence
-  - invalid state transitions
-  - serialization/deserialization boundaries
-  - unicode/path/env-var edge cases
-  - concurrency/race-like behavior where applicable
-- Find one real bug.
-- Create an inline `repro_command` that fails before the fix and passes after.
-- Add a committed regression test.
-- Fix the bug minimally.
-- Write `.autotester/attempt.json` with `description`, `repro_command`, `test_command`, `test_files`, `fix_files`, and optional `parent_failure_pattern`.
-- Commit exactly one commit containing only the declared test and fix files.
-- Stop after committing so the harness can validate.
+In `src/metric.ts`, update `spawnSync` env:
 
-Explicitly forbid:
-
-- Speculative bug reports without reproduction.
-- Committing failing tests.
-- Broad rewrites.
-- Fixing multiple bugs in one attempt.
-- Treating missing documentation or style issues as bugs.
-- Changing product behavior unless the previous behavior is clearly wrong by docs, tests, invariants, or obvious safety expectations.
-- Editing `program.md`, `results.tsv`, or `.autotester*` control files.
-
-## Scope guidance
-
-For bug-finder, users should usually initialize with source and tests editable:
-
-```bash
-autotester init ~/src/my-repo \
-  --program programs/bug-finder.md \
-  --editable 'src/**' \
-  --editable 'tests/**'
+```ts
+env: {
+  ...process.env,
+  UV_LINK_MODE: process.env.UV_LINK_MODE ?? "copy",
+}
 ```
 
-Unlike `simplifier`, this starter is expected to edit both implementation and tests.
+This affects gate, metric, repro, and targeted test commands. It should not change correctness; it only suppresses uv hardlink warning noise and makes behavior explicit.
 
-## README updates
+## Change 4 — Track/report repair count
 
-Add to starter table:
+### Current summary
 
-```md
-| `programs/bug-finder.md` | Probe behavior like a QA tester; add a regression test and fix for each verified latent bug. |
+Run summary reports:
+
+```text
+attempts: 2 (2 keep, 0 discard, 0 crash)
 ```
 
-Add a short `bugfix mode` subsection:
+But if one attempt needed repair, the summary hides it.
 
-- `mode: bugfix` uses negative verified defect retirements.
-- Manifest requires `description`, `repro_command`, `test_command`, `test_files`, `fix_files`.
-- Harness checks exactly one commit, declared changed files, protected files, parent repro fails, child repro passes, targeted test passes, full gate passes.
-- Validation happens in temp worktrees to avoid side effects in the main repo.
+### Desired summary
+
+Console:
+
+```text
+attempts: 2 (2 keep, 0 discard, 0 crash, 1 repaired)
+```
+
+JSON:
+
+```json
+{
+  "repairs": 1
+}
+```
+
+History table could remain unchanged initially, or add a compact column later.
+
+### Implementation
+
+- Add `repairs: number` to `RunSummary` in `src/history.ts`.
+- Initialize `let repairs = 0` in `runner.ts`.
+- Increment when a repair turn is triggered, regardless of final keep/discard/crash.
+- Include `repairs` in summary JSON.
+- Print repair count in final console summary.
+- Optional: add to `formatHistoryTable()` as a `REP` column. This is small and useful.
+
+Recommendation: add `REP` to history output now, since summary schema changes anyway.
 
 ## Tests
 
-Add unit/integration tests for:
+Add/update tests for:
 
-1. Front matter parses `mode: bugfix`.
-2. Unknown `mode` is rejected.
-3. Optimize mode still requires `metric`.
-4. Bugfix mode permits no `metric`.
-5. Manifest parser accepts required bugfix fields.
-6. Manifest parser rejects missing `repro_command`/`test_command`/`test_files`/`fix_files` in bugfix mode.
-7. Protected-file detection.
-8. Changed-file validation against manifest.
-9. Worktree parent/child repro helper:
-   - create temp git repo with buggy function,
-   - child fixes function and adds test,
-   - parent repro fails,
-   - child repro passes.
-10. Diagnostics JSON shape.
-11. Runner-level bugfix validation if practical without invoking Pi; otherwise test the validation helper directly.
+1. `runShell()` env includes `UV_LINK_MODE=copy` when unset.
+   - Could test indirectly with a command:
+     ```bash
+     printf 'metric: 0\n'; test "$UV_LINK_MODE" = copy
+     ```
+   - Or expose env builder helper for unit test.
+2. Bugfix repair diagnostics preserve pre-repair failure.
+   - Unit-level test can construct/merge diagnostics without running Pi.
+   - If direct runner repair testing is too heavy, test the helper in `bugfix.ts`.
+3. `RunSummary` accepts `repairs` and `formatHistoryTable()` displays it.
+4. Existing bugfix validation tests still pass.
+
+No need to run a full LLM smoke test for these four changes; the previous max-2 run already validated behavior. A build/test pass is enough.
 
 ## Implementation phases
 
-### Phase 1 — Front matter + validation types
+### Phase 1 — Shell env noise fix
 
-- Add `mode?: "optimize" | "bugfix"` to `FrontMatter`.
-- Parse and validate `mode`.
-- Update runner startup validation:
-  - optimize requires `gate` + `metric`
-  - bugfix requires `gate`
+- Update `runShell()` env with `UV_LINK_MODE=copy` default.
+- Add a small test if convenient.
 
-### Phase 2 — Attempt manifest parsing
+### Phase 2 — Repair count summary
 
-- Extract manifest parsing from `runner.ts` into a helper/module.
-- Define `AttemptManifest` with optional bugfix fields.
-- Add `requireBugfixManifest()` validation helper.
+- Add `repairs` to `RunSummary`.
+- Track repairs in `runner.ts`.
+- Print repairs in final summary.
+- Add `REP` column to `history` table.
+- Update/add tests.
 
-### Phase 3 — Git/worktree + file-validation helpers
+### Phase 3 — Diagnostic preservation
 
-- Add helpers:
-  - `commitCount(repo, from, to)`
-  - `changedFiles(repo, from, to)`
-  - `createDetachedWorktree(repo, ref)`
-  - `removeWorktree(repo, path)`
-  - protected-file detection
-  - manifest-file coverage validation
-- Ensure worktree cleanup in `finally`.
+- Add repair metadata fields to bugfix diagnostics:
+  - `repaired`
+  - `repairCount`
+  - `repairs`
+- Preserve initial full-gate-failed diagnostic when repair is triggered.
+- Ensure final `0001.json` includes both final validation and repair history.
 
-### Phase 4 — Bugfix validation path
+### Phase 4 — Docs
 
-- Implement `validateBugfixAttempt()` returning:
-  - status
-  - metric (`-count` for keep, `inf` for reject)
-  - description
-  - reason
-  - command diagnostics
-- Integrate into runner loop.
-- Maintain `verifiedRegressionFixes` count in run state.
+- Update README bugfix-mode paragraph:
+  - repair turns are recorded in diagnostics,
+  - final summary includes repair count,
+  - `UV_LINK_MODE=copy` is set by harness for quieter uv validation.
 
-### Phase 5 — Diagnostics
+### Phase 5 — Build/test/commit/push
 
-- Write `.autotester/attempts/<attempt>.json` for every bugfix attempt.
-- Include parent/child SHA, status, reason, manifest fields, command exit/duration/stdout/stderr tails.
-
-### Phase 6 — Starter + docs
-
-- Add `programs/bug-finder.md`.
-- Update README starter table and bugfix-mode explanation.
-
-### Phase 7 — Tests + smoke
-
-- Run build/tests.
-- Smoke test `autotester init --program programs/bug-finder.md`.
-- If time permits, create a tiny temp git repo and test bugfix validation helper without Pi.
+- `pnpm build`
+- `pnpm test`
+- Commit with message focused on bug-finder repair observability.
+- Push to `origin/master`.
 
 ## Non-goals
 
-- No issue filing.
-- No findings-only artifact mode.
-- No severity-weighted metric.
-- No multiple commits per attempt.
-- No automatic duplicate-bug detection.
-- No ttasks-specific code or paths.
+- No PR publishing command.
+- No automatic upstream/fork PR handling.
+- No additional repair attempts beyond one.
+- No TSV schema change.
+- No change to bugfix acceptance criteria.
+- No change to starter-template workflow.
 - No new dependencies.

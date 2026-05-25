@@ -16,6 +16,7 @@ export interface RunSummary {
   discards: number;
   crashes: number;
   blocked: number;
+  repairs: number;
   model: string;
   reason: "completed" | "max-attempts" | "time-budget" | "agent-stopped" | "error";
   errorMessage?: string;
@@ -57,7 +58,7 @@ function pad(s: string, n: number): string {
 
 export function formatHistoryTable(rows: RunSummary[]): string {
   if (rows.length === 0) return "(no runs recorded)";
-  const header = ["TAG", "WHEN", "MODEL", "BASE", "BEST", "Δ", "ATT", "K/D/C/B", "TIME", "WHY"];
+  const header = ["TAG", "WHEN", "MODEL", "BASE", "BEST", "Δ", "ATT", "K/D/C/B", "REP", "TIME", "WHY"];
   const lines: string[][] = [header];
   for (const r of rows) {
     const when = r.startedAt.slice(0, 16).replace("T", " ");
@@ -71,6 +72,7 @@ export function formatHistoryTable(rows: RunSummary[]): string {
       r.delta >= 0 ? `+${r.delta}` : String(r.delta),
       String(r.attempts),
       `${r.keeps}/${r.discards}/${r.crashes}/${r.blocked}`,
+      String(r.repairs ?? 0),
       time,
       r.reason,
     ]);

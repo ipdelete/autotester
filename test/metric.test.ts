@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMetric } from "../src/metric.js";
+import { parseMetric, runShell } from "../src/metric.js";
 
 describe("parseMetric", () => {
   it("parses an integer metric", () => {
@@ -24,5 +24,10 @@ describe("parseMetric", () => {
 
   it("ignores 'metric:' that has no number", () => {
     expect(parseMetric("metric: foo\n")).toBeUndefined();
+  });
+
+  it("sets UV_LINK_MODE=copy for harness shell commands by default", () => {
+    const r = runShell(process.cwd(), 'test "$UV_LINK_MODE" = copy', 5);
+    expect(r.ok).toBe(true);
   });
 });

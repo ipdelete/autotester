@@ -31,7 +31,7 @@ import { runMetric, runShell } from "./metric.js";
 import { appendResultsRow, type AttemptStatus } from "./results.js";
 import { writeRunSummary, type RunSummary } from "./history.js";
 import { consumeAttemptManifest } from "./attempt.js";
-import { validateBugfixAttempt } from "./bugfix.js";
+import { validateBugfixAttempt, writeBugfixDiagnostic, type RepairRecord } from "./bugfix.js";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -224,7 +224,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   let bestMetric = baselineMetricValue;
   let lastKeptHead = startHead;
   const history: AttemptHistoryEntry[] = [];
-  let keeps = 0, discards = 0, crashes = 0, blocked = 0;
+  let keeps = 0, discards = 0, crashes = 0, blocked = 0, repairs = 0;
   let verifiedRegressionFixes = 0;
   let reason: RunSummary["reason"] = "completed";
   let errorMessage: string | undefined;
@@ -342,6 +342,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
         });
 
         if (validation.status === "discard" && validation.reason === "full gate failed") {
+          repairs += 1;
           const diagnosticPath = resolve(
             repo,
             ".autotester",
@@ -370,14 +371,30 @@ export async function runAutotester(options: RunOptions): Promise<number> {
             );
           }
 
+          const repairRecords: RepairRecord[] = [{
+            trigger: "full gate failed",
+            before: validation.diagnostic,
+          }];
           const repairedHead = headSha(repo);
           const repairedDelta = commitCount(repo, headBefore, repairedHead);
           if (repairedDelta !== 1) {
+            const reason = `repair left ${repairedDelta} commits from parent; expected exactly one amended commit`;
+            const diagnostic = {
+              ...validation.diagnostic,
+              status: "crash" as AttemptStatus,
+              reason,
+              child: repairedHead,
+              repaired: true,
+              repairCount: repairRecords.length,
+              repairs: repairRecords,
+            };
+            writeBugfixDiagnostic(repo, diagnostic);
             validation = {
               status: "crash",
               metric: Number.POSITIVE_INFINITY,
               description: manifest?.description ?? "bugfix repair did not preserve one-commit shape",
-              reason: `repair left ${repairedDelta} commits from parent; expected exactly one amended commit`,
+              reason,
+              diagnostic,
             };
           } else {
             const repairedManifest = consumeAttemptManifest(repo) ?? manifest;
@@ -390,7 +407,16 @@ export async function runAutotester(options: RunOptions): Promise<number> {
               gate: frontMatter.gate,
               timeoutSec: attemptTimeout,
               verifiedRegressionFixes,
+              repairs: repairRecords,
             });
+            repairRecords[0]!.after = {
+              status: validation.status,
+              reason: validation.reason,
+              child: repairedHead,
+            };
+            // Re-write once more so the canonical diagnostic includes the repair's final outcome.
+            validation.diagnostic.repairs = repairRecords;
+            writeBugfixDiagnostic(repo, validation.diagnostic);
           }
         }
 
@@ -488,6 +514,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       discards,
       crashes,
       blocked,
+      repairs,
       model: modelString,
       reason,
       errorMessage,
@@ -497,7 +524,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
     console.log("\n\n--- autotester summary ---");
     console.log(`branch: ${branchName}`);
     console.log(`baseline -> best: ${baselineMetricValue} -> ${bestMetric} (Δ ${summary.delta >= 0 ? "+" : ""}${summary.delta})`);
-    console.log(`attempts: ${summary.attempts} (${keeps} keep, ${discards} discard, ${crashes} crash)`);
+    console.log(`attempts: ${summary.attempts} (${keeps} keep, ${discards} discard, ${crashes} crash, ${repairs} repaired)`);
     console.log(`wall clock: ${Math.round(wallClockSec)}s`);
     console.log(`stop reason: ${reason}`);
     console.log(`last kept HEAD: ${lastKeptHead}`);
