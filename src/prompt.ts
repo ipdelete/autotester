@@ -14,6 +14,8 @@ export interface FrontMatter {
   provider?: string;
   model?: string;
   thinking?: string;
+  /** Validation mode. Omitted means optimize. */
+  mode?: "optimize" | "bugfix";
   /** Shell snippet that must exit 0 for an attempt to be kept. */
   gate?: string;
   /** Shell snippet that prints `metric: <float>` to stdout. */
@@ -50,6 +52,7 @@ export interface FirstAttemptOptions {
   maxAttempts: number;
   timeBudgetSeconds?: number;
   attemptNumber: number;
+  mode?: "optimize" | "bugfix";
 }
 
 export interface NextAttemptOptions {
@@ -58,6 +61,7 @@ export interface NextAttemptOptions {
   remainingSeconds?: number;
   bestMetric: number;
   recent: AttemptHistoryEntry[];
+  mode?: "optimize" | "bugfix";
 }
 
 export function packageRoot(): string {
@@ -68,7 +72,7 @@ export function bundledProgramPath(name = "simplifier"): string {
   return resolve(packageRoot(), "programs", `${name}.md`);
 }
 
-const SCALAR_KEYS = new Set(["provider", "model", "thinking", "baseline_description"]);
+const SCALAR_KEYS = new Set(["provider", "model", "thinking", "mode", "baseline_description"]);
 const BLOCK_KEYS = new Set(["gate", "metric"]);
 const ALL_KEYS = new Set<string>([...SCALAR_KEYS, ...BLOCK_KEYS]);
 
@@ -167,6 +171,9 @@ export function parseFrontMatter(source: string): { body: string; frontMatter: F
     ) {
       value = value.slice(1, -1);
     }
+    if (key === "mode" && value !== "optimize" && value !== "bugfix") {
+      throw new Error(`program front matter line ${i + 1}: mode must be 'optimize' or 'bugfix'`);
+    }
     (frontMatter as Record<string, string>)[key] = value;
     i += 1;
   }
@@ -206,7 +213,29 @@ function formatScopeBlock(scope: PromptScope): string {
   return lines.join("\n");
 }
 
-const ATTEMPT_PROTOCOL = `Per-attempt protocol (the harness enforces this; do not deviate):
+function attemptProtocol(mode: "optimize" | "bugfix"): string {
+  if (mode === "bugfix") {
+    return `Per-attempt protocol (the harness enforces this; do not deviate):
+
+1. Read context: the program above describes how to search for one latent bug,
+   add a regression test, and fix it. The harness — not you — proves whether
+   the parent commit fails and the child commit passes.
+2. Propose exactly one bugfix. Edit only the files needed for the declared
+   regression test and fix.
+3. Before committing, write .autotester/attempt.json with:
+       {"description":"...","repro_command":"...","test_command":"...","test_files":["..."],"fix_files":["..."]}
+   You may include "parent_failure_pattern" when useful.
+4. Stage and commit exactly one commit containing only the declared test_files
+   and fix_files. The pre-commit hook may reject out-of-scope paths.
+5. STOP after committing. Do not edit results.tsv or harness control files. The
+   harness will validate in temp worktrees and tell you whether the bugfix was kept.
+
+Keep searching until the harness stops you. If a hypothesis is speculative or
+not reproducible, abandon it internally and try another. If you truly cannot
+produce a candidate, say so and do NOT commit; HEAD-not-moved is the stop signal.`;
+  }
+
+  return `Per-attempt protocol (the harness enforces this; do not deviate):
 
 1. Read context: the program above describes what kinds of changes to propose
    and what the metric measures. The harness — not you — runs the gate and
@@ -226,6 +255,7 @@ const ATTEMPT_PROTOCOL = `Per-attempt protocol (the harness enforces this; do no
 If you decide there are no more high-confidence changes to make, say so in
 plain text in your final message of this turn and do NOT commit. The harness
 treats "HEAD did not move" as the stop signal.`;
+}
 
 export function buildFirstAttemptPrompt(opts: FirstAttemptOptions): string {
   const variables: string[] = [
@@ -235,6 +265,7 @@ export function buildFirstAttemptPrompt(opts: FirstAttemptOptions): string {
     `BASELINE_METRIC=${opts.baselineMetric}`,
     `BEST_METRIC=${opts.bestMetric}`,
     `ATTEMPT=${opts.attemptNumber}`,
+    `MODE=${opts.mode ?? "optimize"}`,
   ];
   if (opts.timeBudgetSeconds !== undefined) {
     variables.push(`TIME_BUDGET_SECONDS=${opts.timeBudgetSeconds}`);
@@ -243,6 +274,10 @@ export function buildFirstAttemptPrompt(opts: FirstAttemptOptions): string {
     opts.scope && (opts.scope.editable.length > 0 || opts.scope.readonly.length > 0)
       ? `\n${formatScopeBlock(opts.scope)}\n`
       : "";
+  const mode = opts.mode ?? "optimize";
+  const goalLine = mode === "bugfix"
+    ? `This is attempt ${opts.attemptNumber}. Baseline metric is ${opts.baselineMetric}; your goal is to retire one verified latent defect.`
+    : `This is attempt ${opts.attemptNumber}. Baseline metric is ${opts.baselineMetric};\nyour goal is to commit a change that lowers it.`;
   return `You are running autotester in this repository:
 
 ${opts.repo}
@@ -257,10 +292,9 @@ Program (what to optimize and how to propose changes):
 ${opts.programText.trim()}
 </program>
 
-${ATTEMPT_PROTOCOL}
+${attemptProtocol(mode)}
 
-This is attempt ${opts.attemptNumber}. Baseline metric is ${opts.baselineMetric};
-your goal is to commit a change that lowers it. Begin.
+${goalLine} Begin.
 `;
 }
 
@@ -269,10 +303,14 @@ export function buildNextAttemptPrompt(opts: NextAttemptOptions): string {
     .slice(-3)
     .map((r) => `  - attempt ${r.attempt}: ${r.status} (metric=${r.metric}) — ${r.description}`)
     .join("\n");
+  const mode = opts.mode ?? "optimize";
   const timeLine =
     opts.remainingSeconds !== undefined
       ? `Remaining: ${opts.remainingAttempts} attempts, ${opts.remainingSeconds}s time budget.`
       : `Remaining: ${opts.remainingAttempts} attempts.`;
+  const instruction = mode === "bugfix"
+    ? "Propose one more focused bugfix, following the per-attempt protocol. Keep searching until the harness stops you; if a hypothesis is not reproducible, try another."
+    : "Propose one more focused change, following the per-attempt protocol. If only risky or subjective changes remain, say so in plain text and do NOT commit.";
   return `Attempt ${opts.attemptNumber}.
 
 Current best metric: ${opts.bestMetric}.
@@ -281,7 +319,6 @@ ${timeLine}
 Recent attempts (most recent last):
 ${recent || "  (none yet)"}
 
-Propose one more focused change, following the per-attempt protocol. If only
-risky or subjective changes remain, say so in plain text and do NOT commit.
+${instruction}
 `;
 }

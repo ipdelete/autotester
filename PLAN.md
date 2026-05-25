@@ -1,224 +1,556 @@
-# Plan: replace repo-specific programs with useful starter templates
+# Plan: add `bug-finder.md` with deterministic bugfix validation mode
 
 ## Goal
 
-Keep the current `program.md` workflow exactly as-is:
+Add a new starter template, `programs/bug-finder.md`, for an autoresearch-style QA loop:
 
-- `programs/*.md` is a library of starter templates.
-- `autotester init <repo> --program programs/<name>.md` copies the chosen file to `<repo>/program.md`.
-- The user edits `<repo>/program.md` for their repo before running.
-- `autotester run` reads that `program.md` and uses the harness-owned `gate`/`metric` contract.
+1. Learn how the system is meant to be used.
+2. Probe unexpected but plausible usage.
+3. Find one real latent bug.
+4. Add a regression test.
+5. Fix the bug.
+6. Commit exactly one test+fix commit.
+7. Let the harness prove the bug existed before and is fixed now.
 
-Do **not** add roles, repo cards, template composition, `.autotester.repo.json`, or a new selection mechanism.
+Keep the existing starter-template workflow:
 
-The work is to make `programs/` contain broadly useful starter programs instead of one repo-specific test program and one vague placeholder.
+- No roles system.
+- No repo card.
+- No template composition.
+- `autotester init <repo> --program programs/bug-finder.md` copies the starter into `<repo>/program.md`.
+- User edits `<repo>/program.md` before running.
 
-## Current problem
+This adds one harness validation mode, `mode: bugfix`, beside the current default optimization mode.
 
-### `programs/ttasks.md`
+## Autoresearch alignment
 
-Too repo-specific:
+This should preserve the important autoresearch discipline:
 
-- Hard-codes `src/ttasks/`.
-- Hard-codes importing `ttasks` and hashing `ttasks.__all__`.
-- Assumes `uv`, `pytest`, `ruff`, and `ty`.
-- Was useful for smoke-testing the harness, but is not a good general template.
+```text
+agent proposes experiment -> deterministic evaluator scores it -> branch advances only on verified improvement -> results.tsv logs the trajectory
+```
 
-Action: remove it from the public starter set or move it to an internal smoke-test fixture.
+Mapping:
 
-### `programs/autotester.md`
+| autoresearch | bug-finder |
+| --- | --- |
+| experiment = training-code change | experiment = one bug hypothesis + regression test + fix |
+| evaluator = `uv run train.py` | evaluator = parent-fail / child-pass / targeted-test-pass / gate-pass harness |
+| metric = val_bpb, lower better | metric = `-verified_regression_fixes`, lower better |
+| keep if model improves | keep if latent defect is proved and retired |
+| reset if worse/crash | reset if not proven |
 
-Too generic to be useful:
+The LLM proposes. The harness adjudicates.
 
-- Its default gate is `exit 1`.
-- It is more of a contract example than a productive starter.
-- It does not express a concrete role/user intent.
+## Harness vs LLM ownership
 
-Action: replace with a real default starter, likely `simplifier.md`, or keep a renamed `blank.md` only as a reference template.
+### Harness owns
 
-## Design principle for programs
+Anything objective, mechanical, security/safety-critical, or easy for the model to silently get wrong:
 
-Each starter program should be:
+- Front-matter mode validation.
+- Attempt boundary: parent SHA before turn, child SHA after turn.
+- Exactly-one-commit check.
+- Manifest parsing and required-field validation.
+- Protected-file checks.
+- Changed-file checks against manifest-declared files.
+- Parent and child temp worktree creation/cleanup.
+- Parent repro must fail.
+- Optional parent failure pattern must match.
+- Child repro must pass.
+- Targeted regression test must pass.
+- Full gate must pass.
+- Metric computation: `-verified_regression_fixes`.
+- `results.tsv` append.
+- Per-attempt diagnostics JSON.
+- Reset/clean on reject.
 
-1. **A concrete role** — e.g. simplify code, tighten types, raise coverage.
-2. **Editable after init** — include TODO markers where repo-specific commands/paths must be reviewed.
-3. **Safe by default** — conservative prompt body, no pushes, no broad rewrites.
-4. **Harness-native** — front matter declares `gate` and `metric`; body tells the agent how to propose attempts.
-5. **Specific enough to run with small edits** — don't be so abstract that every user has to rewrite it from scratch.
+### LLM owns
 
-## Proposed starter programs
+Judgment/search work:
 
-### 1. `programs/simplifier.md` — default
+- Learn public usage from README/docs/examples/tests/API/CLI help.
+- Generate bug hypotheses.
+- Design the inline reproduction command.
+- Add a regression test.
+- Make a minimal fix.
+- Write `.autotester/attempt.json`.
+- Commit exactly the test+fix files.
 
-Purpose: reduce code size/complexity while preserving behavior.
+The LLM never decides whether the attempt counts. It only supplies a candidate proof.
+
+## Metric
+
+Use a lower-is-better negative cumulative metric:
+
+```text
+metric = - verified_regression_fixes
+```
+
+Human-facing name:
+
+```text
+verified defect retirements
+```
+
+Meaning:
+
+- Baseline: `metric: 0`.
+- One accepted bugfix: `metric: -1`.
+- Two accepted bugfixes: `metric: -2`.
+
+This does **not** mean the repo has negative bugs. It means the run has retired N previously unknown defects while keeping the repo in a known-good state.
+
+A kept bugfix increments the count by exactly 1. Do not weight by severity in v1; severity is subjective and gameable.
+
+Rejected bugfix attempts use `metric = inf`, consistent with failed-gate semantics.
+
+## Bugfix acceptance rule
+
+A bugfix attempt is kept iff all of these are true:
+
+1. Agent made exactly one commit since the attempt started.
+2. `.autotester/attempt.json` exists and includes required bugfix fields:
+   - `description`
+   - `repro_command`
+   - `test_command`
+   - `test_files`
+   - `fix_files`
+3. The child commit does not touch protected harness files.
+4. The child commit changes every file listed in `test_files` and `fix_files`.
+5. The child commit changes no files outside `test_files ∪ fix_files`.
+6. `repro_command` fails in a temp worktree checked out at the parent commit.
+7. Optional `parent_failure_pattern`, if present, matches parent repro output.
+8. `repro_command` passes in a temp worktree checked out at the child commit.
+9. `test_command` passes in the child worktree.
+10. Program front-matter `gate` passes in the child worktree.
+
+If all pass:
+
+- Keep the main repo at the child commit.
+- Increment `verified_regression_fixes`.
+- Append a row with `metric = -verified_regression_fixes`.
+
+If any check fails:
+
+- Append a row with `metric = inf`.
+- Reset the main repo to the parent commit.
+- Mark status `discard` or `crash` depending on failure type.
+
+## Status classification
+
+| Failure | Status | Reason |
+| --- | --- | --- |
+| No commit | stop | Agent stop signal. |
+| More than one commit | `crash` | Protocol violation. |
+| Missing/invalid manifest | `crash` | Protocol violation. |
+| Missing `test_files`/`fix_files` | `crash` | Cannot verify commit shape. |
+| Protected file edited | `crash` | Harness control file modification. |
+| Manifest file not changed | `crash` | Manifest lied or wrong file listed. |
+| Unlisted file changed | `crash` | Attempt is not scoped to declared test+fix. |
+| Parent repro times out/infrastructure failure | `crash` | Cannot prove parent behavior. |
+| Parent repro passes | `discard` | Not proven to be a pre-existing bug. |
+| Parent repro fails but pattern does not match | `discard` | Failure is not the claimed failure. |
+| Child repro fails | `discard` | Fix does not satisfy reproduction. |
+| Child targeted test fails | `discard` | Regression test does not pass. |
+| Full child gate fails | `discard` | Fix regresses the repo. |
+| Any unexpected harness exception | `crash` | Unexpected validation failure. |
+
+## Why use `repro_command` instead of only the new test?
+
+The committed regression test does not exist on the parent commit. Running the new test path against the parent would fail because the file is missing, not necessarily because the bug exists.
+
+So the agent must provide an inline reproduction command that works against both parent and child:
+
+- On parent: exits nonzero because the bug exists.
+- On child: exits zero because the bug is fixed.
+
+The committed regression test is still required to keep the bug fixed in the future.
+
+## Attempt manifest schema
+
+Existing optimize mode manifest:
+
+```json
+{"description": "short summary"}
+```
+
+Bugfix mode manifest:
+
+```json
+{
+  "description": "Fix empty input crash in parser",
+  "repro_command": "python - <<'PY'\n...\nPY",
+  "test_command": "pytest tests/test_parser.py::test_empty_input -q",
+  "test_files": ["tests/test_parser.py"],
+  "fix_files": ["src/parser.py"],
+  "parent_failure_pattern": "ValueError|AssertionError"
+}
+```
+
+Required in bugfix mode:
+
+- `description`: one-line human summary.
+- `repro_command`: inline command that fails on parent and passes on child.
+- `test_command`: command targeting the committed regression test.
+- `test_files`: array of test files changed/added by the commit.
+- `fix_files`: array of implementation/config files changed by the fix.
+
+Optional:
+
+- `parent_failure_pattern`: regex matched against parent repro stdout+stderr. Useful to prove the parent failed for the claimed reason rather than a syntax/import/setup error.
+
+Potential future fields, not used in v1:
+
+```json
+{
+  "severity": "low|medium|high",
+  "area": "parser"
+}
+```
+
+Do not weight the metric by these fields in v1.
+
+## Protected files
+
+Reject bugfix commits touching harness control files:
+
+- `program.md`
+- `results.tsv`
+- `.autotester.json`
+- `.autotester/attempt.json`
+- `.autotester/runs/**`
+- `.autotester/attempts/**`
+
+This should probably become a general harness rule for all modes later, but implement/enforce it for bugfix mode first.
+
+## Harness design
+
+### Front matter
+
+Add supported key:
+
+```yaml
+mode: optimize | bugfix
+```
+
+Default when omitted:
+
+```yaml
+mode: optimize
+```
+
+Validation:
+
+- `optimize` requires `gate` and `metric`.
+- `bugfix` requires `gate`; `metric` is optional/ignored because the harness supplies `-verified_regression_fixes`.
+- Unknown mode is a startup error.
+
+### Runner branching
+
+Current loop validates attempts with:
+
+```text
+gate passes && metric improves
+```
+
+New shape:
+
+```text
+if mode == optimize:
+  existing gate + metric improvement path
+else if mode == bugfix:
+  regression-proof path
+```
+
+### Two temp worktrees
+
+Do validation in temp worktrees so repro/test/gate side effects never affect the main repo:
+
+1. `parent = HEAD before agent turn`.
+2. Agent commits; `child = HEAD after agent turn`.
+3. Create temp detached worktree at parent:
+
+```bash
+git worktree add --detach <parent_tmpdir> <parent>
+```
+
+4. Create temp detached worktree at child:
+
+```bash
+git worktree add --detach <child_tmpdir> <child>
+```
+
+5. Run `repro_command` in parent worktree, expect failure.
+6. Run `repro_command` in child worktree, expect success.
+7. Run `test_command` in child worktree, expect success.
+8. Run `gate` in child worktree, expect success.
+9. Remove both worktrees in `finally`:
+
+```bash
+git worktree remove --force <tmpdir>
+```
+
+Use existing `attemptTimeout` for each shell command.
+
+Do not copy untracked files into worktrees. The repro/test/gate must be self-contained from a clean checkout plus normal dependency manager behavior.
+
+### Commit count
+
+Require exactly one commit per attempt:
+
+```bash
+git rev-list --count <parent>..HEAD
+```
+
+- Count 0: agent stop signal.
+- Count 1: continue validation.
+- Count >1: `crash`, protocol violation, reset to parent.
+
+### Changed-file validation
+
+Compute changed files:
+
+```bash
+git diff --name-only <parent>..<child>
+```
+
+Then:
+
+- reject if any protected file changed,
+- reject if any `test_files` entry did not change,
+- reject if any `fix_files` entry did not change,
+- reject if any changed file is not listed in `test_files ∪ fix_files`.
+
+This makes the attempt auditable: one bug, one declared regression test set, one declared fix set.
+
+### Per-attempt diagnostics
+
+Write structured validation diagnostics for every bugfix attempt:
+
+```text
+.autotester/attempts/<attempt>.json
+```
+
+Example:
+
+```json
+{
+  "attempt": 2,
+  "status": "discard",
+  "reason": "parent-repro-passed",
+  "parent": "abc1234",
+  "child": "def5678",
+  "description": "duplicate-id repro",
+  "commands": {
+    "parent_repro": {"exitCode": 0, "durationMs": 120, "stdoutTail": "...", "stderrTail": "..."},
+    "child_repro": null,
+    "targeted_test": null,
+    "gate": null
+  }
+}
+```
+
+Keep `results.tsv` compact; diagnostics are for audit/debugging.
+
+### Results rows
+
+Keep existing TSV header:
+
+```text
+attempt  elapsed_s  metric  status  commit  description
+```
+
+For bugfix mode:
+
+- Baseline row: metric `0`, status `keep`, commit start SHA.
+- Kept attempt N: metric `-N`, status `keep`, commit child SHA.
+- Rejected attempts: metric `inf`, status `discard`/`crash`, commit attempted child SHA.
+
+Example:
+
+```text
+attempt elapsed_s metric status  commit  description
+0       4         0      keep    c763261 initial baseline
+1       180       -1     keep    a1b2c3d fix empty input crash in parser
+2       310       inf    discard d4e5f6a duplicate-id repro passed on parent
+3       515       -2     keep    987abcd fix cancellation leaving executor blocked
+```
+
+## `programs/bug-finder.md` starter
 
 Front matter:
 
-- Default model: `github-copilot/claude-opus-4.7`.
-- `gate`: TODO block with common Python/Node examples commented in.
-- `metric`: default portable source-line count over `src/` using POSIX tools or Python.
+```yaml
+---
+provider: github-copilot
+model: claude-opus-4.7
+thinking: high
+mode: bugfix
+gate: |
+  set -e
+  # TODO: Replace with your repo's correctness gate.
+  # Python/uv:
+  #   uv run pytest -q
+  #   uv run ruff check .
+  #   uv run ty check
+  # Node:
+  #   npm test
+  #   npm run lint
+  echo "TODO: edit program.md and set a real gate command" >&2
+  exit 1
+baseline_description: initial baseline (0 verified defect retirements)
+---
+```
 
-Body:
+No `metric` block required.
 
-- Prefer small behavior-preserving refactors.
-- Examples: deduplicate branches, inline one-shot helpers, remove dead parameters, replace bespoke loops with stdlib/comprehensions.
-- Forbid public API changes, test rewrites, formatting churn, broad architectural changes.
-- Stop when only risky/subjective changes remain.
+Body should instruct the agent to:
 
-Use as the default bundled program copied by `autotester init` when no `--program` is passed.
+- Think like a QA tester.
+- Keep searching until the harness stops you. Do not ask the human whether to continue.
+- If a hypothesis is speculative or not reproducible, abandon it internally and try another subsystem.
+- Learn public usage from README, docs, examples, tests, CLI help, public APIs.
+- Identify core domain objects and lifecycle operations.
+- Probe unexpected but plausible usage:
+  - empty inputs
+  - malformed inputs
+  - duplicate IDs/names
+  - deeply nested or complex structures
+  - graph cycles/disconnected graphs/dependency issues
+  - persistence round trips
+  - cancellation/interruption
+  - repeated calls/idempotence
+  - invalid state transitions
+  - serialization/deserialization boundaries
+  - unicode/path/env-var edge cases
+  - concurrency/race-like behavior where applicable
+- Find one real bug.
+- Create an inline `repro_command` that fails before the fix and passes after.
+- Add a committed regression test.
+- Fix the bug minimally.
+- Write `.autotester/attempt.json` with `description`, `repro_command`, `test_command`, `test_files`, `fix_files`, and optional `parent_failure_pattern`.
+- Commit exactly one commit containing only the declared test and fix files.
+- Stop after committing so the harness can validate.
 
-### 2. `programs/type-tightener.md`
+Explicitly forbid:
 
-Purpose: improve static typing without changing runtime behavior.
+- Speculative bug reports without reproduction.
+- Committing failing tests.
+- Broad rewrites.
+- Fixing multiple bugs in one attempt.
+- Treating missing documentation or style issues as bugs.
+- Changing product behavior unless the previous behavior is clearly wrong by docs, tests, invariants, or obvious safety expectations.
+- Editing `program.md`, `results.tsv`, or `.autotester*` control files.
 
-Metric options:
+## Scope guidance
 
-- Count type-checker errors/warnings.
-- Or count unannotated public functions/classes via a small Python AST script.
+For bug-finder, users should usually initialize with source and tests editable:
 
-Gate:
+```bash
+autotester init ~/src/my-repo \
+  --program programs/bug-finder.md \
+  --editable 'src/**' \
+  --editable 'tests/**'
+```
 
-- Repo test command.
-- Type checker command (`mypy`, `pyright`, `ty`, `tsc`, etc.) as a TODO.
-
-Body:
-
-- Add annotations, improve generics, remove unnecessary `Any`, narrow unions.
-- No behavior changes.
-- Prefer local, obvious annotations over large type abstractions.
-- Do not silence errors with ignores unless the program explicitly says to.
-
-### 3. `programs/coverage-raiser.md`
-
-Purpose: add or improve tests for uncovered behavior.
-
-Metric options:
-
-- Uncovered line count from coverage XML/JSON.
-- Or negative coverage percentage if the harness expects lower-is-better.
-
-Gate:
-
-- Test suite with coverage enabled.
-
-Body:
-
-- Edit tests, not production code, unless a discovered bug requires a minimal fix.
-- Prefer high-value branch/edge-case tests.
-- No snapshot churn, no brittle time/order-dependent assertions.
-- If a new test exposes a real bug, either fix it in the same attempt or discard/stop depending on confidence.
-
-Potential caveat: this role may need editable scope like `tests/**` instead of `src/**`; call that out clearly.
-
-### 4. `programs/doc-writer.md`
-
-Purpose: improve public API documentation/docstrings without changing behavior.
-
-Metric options:
-
-- Count public symbols missing docstrings using a Python AST script.
-- Or count markdown/docstring TODO markers.
-
-Gate:
-
-- Repo tests.
-- Optional doc linter (`pydocstyle`, `ruff pydocstyle`, `typedoc`, etc.).
-
-Body:
-
-- Add concise docstrings to public functions/classes/modules.
-- Document parameters, return values, exceptions only where helpful.
-- Do not invent behavior. Read implementation/tests first.
-- Avoid noisy comment spam.
-
-### 5. `programs/dep-pruner.md`
-
-Purpose: remove unused dependencies/imports/config entries safely.
-
-Metric options:
-
-- Count dependencies in manifest.
-- Count unused import findings from linter.
-- Count `pyproject.toml`/`package.json` dependency entries, if that's the target.
-
-Gate:
-
-- Full test/lint/type suite.
-
-Body:
-
-- Remove one dependency/import cluster at a time.
-- Verify lockfile updates if dependency manifests are edited.
-- Do not remove optional/plugin dependencies without evidence.
-- Prefer unused imports first; manifest pruning is higher-risk.
-
-## Handling removed programs
-
-Decisions:
-
-- No `blank.md`; empty contract examples are not useful starters.
-- Delete `programs/ttasks.md`; it was repo-specific smoke-test scaffolding, not a public starter.
-- Delete/replace `programs/autotester.md`; the new default is `programs/simplifier.md`.
+Unlike `simplifier`, this starter is expected to edit both implementation and tests.
 
 ## README updates
 
-Update README to explain:
+Add to starter table:
 
-- `programs/` contains starter templates, not magic roles.
-- The default is `programs/simplifier.md`.
-- Typical workflow:
-
-```bash
-autotester init ~/src/my-repo --program programs/simplifier.md
-$EDITOR ~/src/my-repo/program.md   # set gate, metric, paths, repo-specific rules
-autotester run ~/src/my-repo --tag simplify-1 --max-attempts 10
+```md
+| `programs/bug-finder.md` | Probe behavior like a QA tester; add a regression test and fix for each verified latent bug. |
 ```
 
-- List available templates with one-line descriptions.
-- Mention that `program.md` is meant to be edited before running.
+Add a short `bugfix mode` subsection:
 
-No CLI changes required beyond changing `bundledProgramPath()` default from `autotester` to `simplifier`.
+- `mode: bugfix` uses negative verified defect retirements.
+- Manifest requires `description`, `repro_command`, `test_command`, `test_files`, `fix_files`.
+- Harness checks exactly one commit, declared changed files, protected files, parent repro fails, child repro passes, targeted test passes, full gate passes.
+- Validation happens in temp worktrees to avoid side effects in the main repo.
+
+## Tests
+
+Add unit/integration tests for:
+
+1. Front matter parses `mode: bugfix`.
+2. Unknown `mode` is rejected.
+3. Optimize mode still requires `metric`.
+4. Bugfix mode permits no `metric`.
+5. Manifest parser accepts required bugfix fields.
+6. Manifest parser rejects missing `repro_command`/`test_command`/`test_files`/`fix_files` in bugfix mode.
+7. Protected-file detection.
+8. Changed-file validation against manifest.
+9. Worktree parent/child repro helper:
+   - create temp git repo with buggy function,
+   - child fixes function and adds test,
+   - parent repro fails,
+   - child repro passes.
+10. Diagnostics JSON shape.
+11. Runner-level bugfix validation if practical without invoking Pi; otherwise test the validation helper directly.
 
 ## Implementation phases
 
-### Phase 1 — Template inventory and naming
+### Phase 1 — Front matter + validation types
 
-- Final template set: `simplifier`, `type-tightener`, `coverage-raiser`, `doc-writer`, `dep-pruner`.
-- Remove `autotester.md` and `ttasks.md` from `programs/`.
-- Update default bundled program path to `simplifier`.
+- Add `mode?: "optimize" | "bugfix"` to `FrontMatter`.
+- Parse and validate `mode`.
+- Update runner startup validation:
+  - optimize requires `gate` + `metric`
+  - bugfix requires `gate`
 
-### Phase 2 — Write templates
+### Phase 2 — Attempt manifest parsing
 
-- Create each `programs/<name>.md`.
-- Use current harness contract:
-  - YAML front matter with `provider`, `model`, `gate`, `metric`, optional `baseline_description`.
-  - Body describes what kinds of commits to make and avoid.
-- Include TODO comments in shell snippets and body where repo-specific edits are expected.
+- Extract manifest parsing from `runner.ts` into a helper/module.
+- Define `AttemptManifest` with optional bugfix fields.
+- Add `requireBugfixManifest()` validation helper.
 
-### Phase 3 — Docs
+### Phase 3 — Git/worktree + file-validation helpers
 
-- Rewrite README program/template section.
-- Add a short table of templates.
-- Add examples for Python/uv and Node/npm gate/metric customization.
+- Add helpers:
+  - `commitCount(repo, from, to)`
+  - `changedFiles(repo, from, to)`
+  - `createDetachedWorktree(repo, ref)`
+  - `removeWorktree(repo, path)`
+  - protected-file detection
+  - manifest-file coverage validation
+- Ensure worktree cleanup in `finally`.
 
-### Phase 4 — Tests and smoke checks
+### Phase 4 — Bugfix validation path
 
-- Build and run unit tests.
-- `autotester init` smoke test with default template to confirm it copies `simplifier.md`.
-- `autotester init --program programs/type-tightener.md` smoke test.
-- No need to run a full agent loop for every template; the templates are starter docs, not code paths.
+- Implement `validateBugfixAttempt()` returning:
+  - status
+  - metric (`-count` for keep, `inf` for reject)
+  - description
+  - reason
+  - command diagnostics
+- Integrate into runner loop.
+- Maintain `verifiedRegressionFixes` count in run state.
 
-### Phase 5 — Commit and push
+### Phase 5 — Diagnostics
 
-- Commit message should emphasize: no new mechanism, only better starter programs.
-- Push to `origin/master`.
+- Write `.autotester/attempts/<attempt>.json` for every bugfix attempt.
+- Include parent/child SHA, status, reason, manifest fields, command exit/duration/stdout/stderr tails.
+
+### Phase 6 — Starter + docs
+
+- Add `programs/bug-finder.md`.
+- Update README starter table and bugfix-mode explanation.
+
+### Phase 7 — Tests + smoke
+
+- Run build/tests.
+- Smoke test `autotester init --program programs/bug-finder.md`.
+- If time permits, create a tiny temp git repo and test bugfix validation helper without Pi.
 
 ## Non-goals
 
-- No `--role` flag.
-- No `.autotester.repo.json`.
-- No template interpolation/composition.
-- No automatic role selection.
-- No LLM-generated repo cards.
+- No issue filing.
+- No findings-only artifact mode.
+- No severity-weighted metric.
+- No multiple commits per attempt.
+- No automatic duplicate-bug detection.
+- No ttasks-specific code or paths.
 - No new dependencies.
-- No change to the harness-owned gate/metric loop.

@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export interface GitSummary {
   branch: string;
@@ -71,6 +74,30 @@ export function resetHard(repo: string, ref: string): void {
   // Also clean untracked files that the attempt left behind (e.g. stray
   // build artifacts), but preserve our own .autotester/ and results.tsv.
   git(repo, ["clean", "-fd", "-e", ".autotester/", "-e", "results.tsv", "-e", "program.md"]);
+}
+
+export function commitCount(repo: string, from: string, to = "HEAD"): number {
+  return Number.parseInt(git(repo, ["rev-list", "--count", `${from}..${to}`]), 10);
+}
+
+export function changedFiles(repo: string, from: string, to = "HEAD"): string[] {
+  const out = git(repo, ["diff", "--name-only", `${from}..${to}`]);
+  return out ? out.split("\n").filter(Boolean) : [];
+}
+
+export function createDetachedWorktree(repo: string, ref: string): string {
+  const path = mkdtempSync(join(tmpdir(), "autotester-worktree-"));
+  git(repo, ["worktree", "add", "--detach", path, ref]);
+  return path;
+}
+
+export function removeWorktree(repo: string, path: string): void {
+  try {
+    git(repo, ["worktree", "remove", "--force", path]);
+  } catch {
+    // Best-effort cleanup. If git refuses, prune stale metadata.
+    try { git(repo, ["worktree", "prune"]); } catch { /* ignore */ }
+  }
 }
 
 export function summarizeGit(repo: string, since?: string): GitSummary {

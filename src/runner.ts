@@ -1,4 +1,3 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   AuthStorage,
@@ -14,6 +13,7 @@ import {
   type FrontMatter,
 } from "./prompt.js";
 import {
+  commitCount,
   createBranch,
   currentBranch,
   gitStatus,
@@ -29,6 +29,8 @@ import { configToScope, loadConfig } from "./scope.js";
 import { runMetric, runShell } from "./metric.js";
 import { appendResultsRow, type AttemptStatus } from "./results.js";
 import { writeRunSummary, type RunSummary } from "./history.js";
+import { consumeAttemptManifest } from "./attempt.js";
+import { validateBugfixAttempt } from "./bugfix.js";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -95,21 +97,6 @@ function modelNotFoundError(provider: string, modelId: string): string {
   return `${base} Run 'pi' and use '/login', or check 'pi --list-models'.`;
 }
 
-/** Read .autotester/attempt.json and delete it. Returns description or undefined. */
-function consumeAttemptManifest(repo: string): string | undefined {
-  const path = resolve(repo, ".autotester", "attempt.json");
-  if (!existsSync(path)) return undefined;
-  try {
-    const raw = readFileSync(path, "utf8");
-    const parsed = JSON.parse(raw) as { description?: string };
-    return typeof parsed.description === "string" ? parsed.description : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    try { rmSync(path); } catch { /* ignore */ }
-  }
-}
-
 export async function runAutotester(options: RunOptions): Promise<number> {
   const repo = resolve(options.repo);
   if (!isGitRepo(repo)) throw new Error(`${repo} is not a git repository`);
@@ -123,9 +110,16 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   const program = loadProgram(repo, options.program);
   const frontMatter: FrontMatter = program.frontMatter;
 
-  if (!frontMatter.gate || !frontMatter.metric) {
+  const mode = frontMatter.mode ?? "optimize";
+  if (!frontMatter.gate) {
     throw new Error(
-      `program ${program.path} must declare 'gate' and 'metric' in YAML front matter. ` +
+      `program ${program.path} must declare 'gate' in YAML front matter. ` +
+        `See programs/simplifier.md for the expected shape.`,
+    );
+  }
+  if (mode === "optimize" && !frontMatter.metric) {
+    throw new Error(
+      `program ${program.path} in optimize mode must declare 'metric' in YAML front matter. ` +
         `See programs/simplifier.md for the expected shape.`,
     );
   }
@@ -195,6 +189,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   console.log(`program: ${program.path}`);
   console.log(`model: ${modelString} (provider: ${providerResolved.source}, model: ${modelResolved.source})`);
   if (thinkingResolved.value) console.log(`thinking: ${thinkingResolved.value} (${thinkingResolved.source})`);
+  console.log(`mode: ${mode}`);
   console.log(`max attempts: ${options.maxAttempts}`);
   if (options.timeBudget !== undefined) console.log(`time budget: ${options.timeBudget}s`);
   console.log(`attempt timeout: ${attemptTimeout}s`);
@@ -205,7 +200,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   }
 
   // --- Baseline ----------------------------------------------------------
-  console.log("\n[harness] running baseline gate + metric...");
+  console.log(mode === "bugfix" ? "\n[harness] running baseline gate..." : "\n[harness] running baseline gate + metric...");
   const t0 = Date.now();
   const baselineGate = runShell(repo, frontMatter.gate, attemptTimeout);
   if (!baselineGate.ok) {
@@ -213,22 +208,23 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       `Baseline gate failed (exit=${baselineGate.exitCode}). The repo must be in a passing state before autotester runs.\n${baselineGate.stderr || baselineGate.stdout}`,
     );
   }
-  const baselineMetric = runMetric(repo, frontMatter.metric, attemptTimeout);
-  console.log(`[harness] baseline metric: ${baselineMetric.value} (gate ${baselineGate.durationMs}ms, metric ${baselineMetric.durationMs}ms)`);
+  const baselineMetricValue = mode === "bugfix" ? 0 : runMetric(repo, frontMatter.metric!, attemptTimeout).value;
+  console.log(`[harness] baseline metric: ${baselineMetricValue} (gate ${baselineGate.durationMs}ms)`);
 
   appendResultsRow(repo, {
     attempt: 0,
     elapsedSec: (Date.now() - t0) / 1000,
-    metric: baselineMetric.value,
+    metric: baselineMetricValue,
     status: "keep",
     commit: startHead,
     description: frontMatter.baseline_description ?? "initial baseline",
   });
 
-  let bestMetric = baselineMetric.value;
+  let bestMetric = baselineMetricValue;
   let lastKeptHead = startHead;
   const history: AttemptHistoryEntry[] = [];
   let keeps = 0, discards = 0, crashes = 0, blocked = 0;
+  let verifiedRegressionFixes = 0;
   let reason: RunSummary["reason"] = "completed";
   let errorMessage: string | undefined;
 
@@ -268,11 +264,12 @@ export async function runAutotester(options: RunOptions): Promise<number> {
             programText: program.text,
             branch: branchName,
             scope,
-            baselineMetric: baselineMetric.value,
+            baselineMetric: baselineMetricValue,
             bestMetric,
             maxAttempts: options.maxAttempts,
             timeBudgetSeconds: options.timeBudget,
             attemptNumber: 1,
+            mode,
           })
         : buildNextAttemptPrompt({
             attemptNumber: attempt,
@@ -280,6 +277,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
             remainingSeconds,
             bestMetric,
             recent: history,
+            mode,
           });
 
       process.stdout.write(`\n[harness] --- attempt ${attempt}/${options.maxAttempts} (best=${bestMetric}, elapsed=${Math.round(elapsedSec)}s) ---\n`);
@@ -293,46 +291,91 @@ export async function runAutotester(options: RunOptions): Promise<number> {
         break;
       }
 
-      const description = consumeAttemptManifest(repo) ?? "(no description)";
+      const commitDelta = commitCount(repo, headBefore, headAfter);
+      if (commitDelta > 1) {
+        process.stdout.write(`[harness] attempt made ${commitDelta} commits; protocol requires exactly one; resetting\n`);
+        resetHard(repo, headBefore);
+        appendResultsRow(repo, {
+          attempt,
+          elapsedSec: (Date.now() - t0) / 1000,
+          metric: Number.POSITIVE_INFINITY,
+          status: "crash",
+          commit: headAfter,
+          description: "attempt made more than one commit",
+        });
+        history.push({ attempt, status: "crash", metric: Number.POSITIVE_INFINITY, description: "attempt made more than one commit" });
+        crashes += 1;
+        continue;
+      }
 
-      // Gate
-      process.stdout.write(`[harness] gate...\n`);
-      const gate = runShell(repo, frontMatter.gate, attemptTimeout);
+      const manifest = consumeAttemptManifest(repo);
+      let description = manifest?.description ?? "(no description)";
       let status: AttemptStatus;
       let metricValue: number;
 
-      if (gate.timedOut || !gate.ok) {
-        status = gate.timedOut ? "crash" : "discard";
-        metricValue = Number.POSITIVE_INFINITY;
-        process.stdout.write(`[harness] gate FAILED (exit=${gate.exitCode}${gate.timedOut ? ", timed out" : ""}); resetting to ${headBefore}\n`);
-        resetHard(repo, headBefore);
-        if (status === "crash") crashes += 1; else discards += 1;
-      } else {
-        let parsed: number | undefined;
-        try {
-          parsed = runMetric(repo, frontMatter.metric, attemptTimeout).value;
-        } catch (err) {
-          parsed = undefined;
-          process.stdout.write(`[harness] metric command failed: ${(err as Error).message}\n`);
-        }
-        if (parsed === undefined || !Number.isFinite(parsed)) {
-          status = "crash";
-          metricValue = Number.POSITIVE_INFINITY;
-          resetHard(repo, headBefore);
-          crashes += 1;
-        } else if (parsed < bestMetric) {
-          status = "keep";
-          metricValue = parsed;
-          bestMetric = parsed;
+      if (mode === "bugfix") {
+        process.stdout.write(`[harness] validating bugfix proof...\n`);
+        const validation = validateBugfixAttempt({
+          repo,
+          attempt,
+          parent: headBefore,
+          child: headAfter,
+          manifest,
+          gate: frontMatter.gate,
+          timeoutSec: attemptTimeout,
+          verifiedRegressionFixes,
+        });
+        status = validation.status;
+        metricValue = validation.metric;
+        description = validation.description;
+        process.stdout.write(`[harness] ${status}: ${validation.reason}\n`);
+        if (status === "keep") {
+          verifiedRegressionFixes += 1;
+          bestMetric = metricValue;
           lastKeptHead = headAfter;
           keeps += 1;
-          process.stdout.write(`[harness] kept: metric ${parsed} < best ${bestMetric === parsed ? "(new best)" : ""}\n`);
         } else {
-          status = "discard";
-          metricValue = parsed;
-          process.stdout.write(`[harness] discarded: metric ${parsed} not better than best ${bestMetric}; resetting\n`);
           resetHard(repo, headBefore);
-          discards += 1;
+          if (status === "crash") crashes += 1; else discards += 1;
+        }
+      } else {
+        // Gate
+        process.stdout.write(`[harness] gate...\n`);
+        const gate = runShell(repo, frontMatter.gate, attemptTimeout);
+
+        if (gate.timedOut || !gate.ok) {
+          status = gate.timedOut ? "crash" : "discard";
+          metricValue = Number.POSITIVE_INFINITY;
+          process.stdout.write(`[harness] gate FAILED (exit=${gate.exitCode}${gate.timedOut ? ", timed out" : ""}); resetting to ${headBefore}\n`);
+          resetHard(repo, headBefore);
+          if (status === "crash") crashes += 1; else discards += 1;
+        } else {
+          let parsed: number | undefined;
+          try {
+            parsed = runMetric(repo, frontMatter.metric!, attemptTimeout).value;
+          } catch (err) {
+            parsed = undefined;
+            process.stdout.write(`[harness] metric command failed: ${(err as Error).message}\n`);
+          }
+          if (parsed === undefined || !Number.isFinite(parsed)) {
+            status = "crash";
+            metricValue = Number.POSITIVE_INFINITY;
+            resetHard(repo, headBefore);
+            crashes += 1;
+          } else if (parsed < bestMetric) {
+            status = "keep";
+            metricValue = parsed;
+            bestMetric = parsed;
+            lastKeptHead = headAfter;
+            keeps += 1;
+            process.stdout.write(`[harness] kept: metric ${parsed} < best ${bestMetric === parsed ? "(new best)" : ""}\n`);
+          } else {
+            status = "discard";
+            metricValue = parsed;
+            process.stdout.write(`[harness] discarded: metric ${parsed} not better than best ${bestMetric}; resetting\n`);
+            resetHard(repo, headBefore);
+            discards += 1;
+          }
         }
       }
 
@@ -366,9 +409,9 @@ export async function runAutotester(options: RunOptions): Promise<number> {
       startedAt,
       endedAt,
       wallClockSec,
-      baselineMetric: baselineMetric.value,
+      baselineMetric: baselineMetricValue,
       bestMetric,
-      delta: bestMetric - baselineMetric.value,
+      delta: bestMetric - baselineMetricValue,
       attempts: keeps + discards + crashes,
       keeps,
       discards,
@@ -382,7 +425,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
 
     console.log("\n\n--- autotester summary ---");
     console.log(`branch: ${branchName}`);
-    console.log(`baseline -> best: ${baselineMetric.value} -> ${bestMetric} (Δ ${summary.delta >= 0 ? "+" : ""}${summary.delta})`);
+    console.log(`baseline -> best: ${baselineMetricValue} -> ${bestMetric} (Δ ${summary.delta >= 0 ? "+" : ""}${summary.delta})`);
     console.log(`attempts: ${summary.attempts} (${keeps} keep, ${discards} discard, ${crashes} crash)`);
     console.log(`wall clock: ${Math.round(wallClockSec)}s`);
     console.log(`stop reason: ${reason}`);

@@ -14,6 +14,7 @@ describe("parseFrontMatter", () => {
       "provider: github-copilot",
       "model: claude-opus-4-7",
       "thinking: medium",
+      "mode: bugfix",
       "---",
       "",
       "# program body",
@@ -23,6 +24,7 @@ describe("parseFrontMatter", () => {
       provider: "github-copilot",
       model: "claude-opus-4-7",
       thinking: "medium",
+      mode: "bugfix",
     });
     expect(body).toBe("# program body");
   });
@@ -56,6 +58,11 @@ describe("parseFrontMatter", () => {
     const source = `---\ngate: pytest -q\nmetric: echo metric: 0\n---\nbody`;
     const { frontMatter } = parseFrontMatter(source);
     expect(frontMatter.gate).toBe("pytest -q");
+  });
+
+  it("rejects invalid mode", () => {
+    const source = `---\nmode: nope\n---\nbody`;
+    expect(() => parseFrontMatter(source)).toThrow(/mode must be/);
   });
 
   it("rejects unknown keys", () => {
