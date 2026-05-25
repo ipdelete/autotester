@@ -3,10 +3,11 @@
 `autotester` runs program-driven coding-agent loops for conservative repository
 improvement.
 
-The product is the program: `program.md` tells the agent how to inspect, refine,
-validate, commit, discard, and log small changes. The CLI is intentionally thin;
-it loads the program, starts a Pi coding-agent session in the target repository,
-and prints a summary when the run finishes.
+The product is the program: `program.md` tells the agent what kind of small,
+conservative improvement to attempt. The CLI is intentionally thin: `init`
+copies a starter template from `programs/` into the target repository as
+`program.md`; you edit that file for the repo; `run` drives a Pi coding-agent
+session and the harness keeps or discards each committed attempt.
 
 ## Requirements
 
@@ -25,22 +26,23 @@ pnpm build
 npm link
 ```
 
-Initialize a repository with the default program:
+Initialize a repository with the default starter (`programs/simplifier.md`):
 
 ```bash
 autotester init ~/src/my-repo
+$EDITOR ~/src/my-repo/program.md   # set the real gate, metric paths, repo rules
 ```
 
-Run a bounded local-only loop:
+Or choose a different starter:
 
 ```bash
-autotester run ~/src/my-repo
+autotester init ~/src/my-repo --program programs/type-tightener.md
 ```
 
-Use a repo-specific program:
+Run a bounded local-only loop after reviewing `program.md`:
 
 ```bash
-autotester run ~/src/my-repo --program ~/src/my-repo/program.md --max-attempts 10
+autotester run ~/src/my-repo --tag simplify-1 --max-attempts 10
 ```
 
 By default, `run` refuses to start if the target repository has uncommitted
@@ -72,6 +74,19 @@ The model triple is resolved per field with this priority: CLI flag >
 program front matter > built-in default (`github-copilot/claude-opus-4.7`,
 no thinking level).
 
+## Starter programs
+
+`programs/` contains starter templates, not magic roles. Pick one at `init`
+time, then edit the generated `program.md` for your repository.
+
+| Template | Purpose |
+| --- | --- |
+| `programs/simplifier.md` | Default. Reduce source size/complexity without behavior changes. |
+| `programs/type-tightener.md` | Add/tighten static types without runtime changes. |
+| `programs/coverage-raiser.md` | Add tests that reduce uncovered behavior. |
+| `programs/doc-writer.md` | Add concise, accurate public documentation/docstrings. |
+| `programs/dep-pruner.md` | Remove unused imports/dependencies conservatively. |
+
 ## Program contract
 
 A `program.md` declares two shell snippets in YAML front matter: a `gate`
@@ -89,8 +104,13 @@ gate: |
   uv run ruff check .
 metric: |
   set -e
-  echo "metric: $(cloc --quiet --csv src 2>/dev/null \
-    | awk -F, 'NR>2 && $1!="SUM" {sum+=$5} END {print sum+0}')"
+  python3 - <<'PY'
+  import pathlib
+  n = sum(1 for p in pathlib.Path("src").rglob("*.py")
+          for line in p.read_text(errors="ignore").splitlines()
+          if line.strip() and not line.strip().startswith("#"))
+  print(f"metric: {n}")
+  PY
 ---
 
 # program body: what kinds of changes to propose, what's out of bounds.

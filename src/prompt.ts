@@ -64,7 +64,7 @@ export function packageRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
-export function bundledProgramPath(name = "autotester"): string {
+export function bundledProgramPath(name = "simplifier"): string {
   return resolve(packageRoot(), "programs", `${name}.md`);
 }
 

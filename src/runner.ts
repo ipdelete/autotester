@@ -126,7 +126,7 @@ export async function runAutotester(options: RunOptions): Promise<number> {
   if (!frontMatter.gate || !frontMatter.metric) {
     throw new Error(
       `program ${program.path} must declare 'gate' and 'metric' in YAML front matter. ` +
-        `See programs/autotester.md for the expected shape.`,
+        `See programs/simplifier.md for the expected shape.`,
     );
   }
 
