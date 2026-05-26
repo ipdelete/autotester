@@ -3,7 +3,18 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { installPreCommitHook, writeConfig } from "../src/scope.js";
+import {
+  CONFIG_FILENAME,
+  HOOK_END_MARKER,
+  HOOK_MARKER,
+  configPath,
+  configToScope,
+  hookScript,
+  installPreCommitHook,
+  loadConfig,
+  writeConfig,
+  type AutotesterConfig,
+} from "../src/scope.js";
 
 function git(repo: string, args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
@@ -21,6 +32,23 @@ function mkRepo(): string {
 }
 
 describe("pre-commit scope hook", () => {
+  it("writes, loads, and formats scope config", () => {
+    const repo = mkRepo();
+    const config: AutotesterConfig = { readonly: ["secrets/**"], editable: ["src/**"] };
+
+    writeConfig(repo, config);
+
+    expect(configPath(repo)).toBe(join(repo, CONFIG_FILENAME));
+    expect(loadConfig(repo)).toEqual(config);
+    expect(configToScope(config)).toEqual(config);
+    expect(configToScope({ readonly: [], editable: [] })).toBeUndefined();
+
+    const script = hookScript();
+    expect(script).toContain(HOOK_MARKER);
+    expect(script).toContain(HOOK_END_MARKER);
+    expect(script).toContain("git diff --cached --name-only");
+  });
+
   it("blocks commits that touch readonly paths", () => {
     const repo = mkRepo();
     writeConfig(repo, { readonly: ["src/prepare.py"], editable: [] });

@@ -1,9 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isProtectedPath, validateBugfixAttempt, validateChangedFiles } from "../src/bugfix.js";
+import {
+  isProtectedPath,
+  validateBugfixAttempt,
+  validateChangedFiles,
+  writeBugfixDiagnostic,
+  type AttemptDiagnostic,
+  type BugfixValidationOptions,
+  type BugfixValidationResult,
+  type RepairRecord,
+} from "../src/bugfix.js";
 import { headSha } from "../src/git.js";
 
 function git(repo: string, args: string[]): void {
@@ -48,7 +57,7 @@ describe("bugfix validation helpers", () => {
   it("keeps a proven parent-fail child-pass bugfix", () => {
     const { repo, parent, child } = repoWithBug();
     const repro = "python3 - <<'PY'\nfrom src.calc import reciprocal\nassert reciprocal(0) == 0\nPY";
-    const res = validateBugfixAttempt({
+    const options: BugfixValidationOptions = {
       repo,
       attempt: 1,
       parent,
@@ -64,12 +73,56 @@ describe("bugfix validation helpers", () => {
       gate: "PYTHONPATH=. python3 tests/test_calc.py",
       timeoutSec: 30,
       verifiedRegressionFixes: 0,
-    });
+    };
+    const res: BugfixValidationResult = validateBugfixAttempt(options);
     expect(`${res.status}: ${res.reason}`).toBe("keep: verified defect retired");
     expect(res.metric).toBe(-1);
     expect(res.diagnostic.repaired).toBe(false);
     expect(res.diagnostic.repairCount).toBe(0);
     expect(res.diagnostic.repairs).toEqual([]);
+  });
+
+  it("writes attempt diagnostics with repair metadata", () => {
+    const repo = mkdtempSync(join(tmpdir(), "autotester-bugfix-diag-"));
+    const repair: RepairRecord = {
+      trigger: "full gate failed",
+      before: {
+        attempt: 1,
+        status: "discard",
+        reason: "full gate failed",
+        parent: "abc1234",
+        child: "def5678",
+        description: "fix sample bug",
+        repaired: false,
+        repairCount: 0,
+        repairs: [],
+        commands: {},
+      },
+      after: { status: "keep", reason: "verified defect retired", child: "fedcba9" },
+    };
+    const diagnostic: AttemptDiagnostic = {
+      attempt: 7,
+      status: "keep",
+      reason: "verified defect retired",
+      parent: "abc1234",
+      child: "fedcba9",
+      description: "fix sample bug",
+      changedFiles: ["tests/test_sample.py", "src/sample.py"],
+      repaired: true,
+      repairCount: 1,
+      repairs: [repair],
+      commands: {},
+    };
+
+    writeBugfixDiagnostic(repo, diagnostic);
+
+    const saved = JSON.parse(readFileSync(join(repo, ".autotester", "attempts", "0007.json"), "utf8"));
+    expect(saved).toMatchObject({
+      attempt: 7,
+      repaired: true,
+      repairCount: 1,
+      repairs: [{ trigger: "full gate failed", after: { child: "fedcba9" } }],
+    });
   });
 
   it("discards when parent repro already passes", () => {

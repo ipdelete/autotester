@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMetric, runShell } from "../src/metric.js";
+import { parseMetric, runMetric, runShell, type GateResult, type MetricResult } from "../src/metric.js";
 
 describe("parseMetric", () => {
   it("parses an integer metric", () => {
@@ -27,7 +27,17 @@ describe("parseMetric", () => {
   });
 
   it("sets UV_LINK_MODE=copy for harness shell commands by default", () => {
-    const r = runShell(process.cwd(), 'test "$UV_LINK_MODE" = copy', 5);
+    const r: GateResult = runShell(process.cwd(), 'test "$UV_LINK_MODE" = copy', 5);
     expect(r.ok).toBe(true);
+  });
+
+  it("runs metric commands and parses the last metric line", () => {
+    const r: MetricResult = runMetric(process.cwd(), "printf 'metric: 99\\nmetric: 7\\n'", 5);
+    expect(r.value).toBe(7);
+    expect(r.stdout).toContain("metric: 99");
+  });
+
+  it("throws when a successful metric command emits no metric line", () => {
+    expect(() => runMetric(process.cwd(), "echo no metric here", 5)).toThrow(/produced no 'metric: <float>' line/);
   });
 });

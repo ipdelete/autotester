@@ -2,11 +2,24 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildFirstAttemptPrompt, buildNextAttemptPrompt, loadProgram } from "../src/prompt.js";
+import {
+  buildBugfixRepairPrompt,
+  buildFirstAttemptPrompt,
+  buildNextAttemptPrompt,
+  bundledProgramPath,
+  loadProgram,
+  packageRoot,
+  type AttemptHistoryEntry,
+  type BugfixRepairPromptOptions,
+  type FirstAttemptOptions,
+  type LoadedProgram,
+  type NextAttemptOptions,
+  type PromptScope,
+} from "../src/prompt.js";
 
 describe("buildFirstAttemptPrompt", () => {
   it("injects repo, program, baseline, and protocol", () => {
-    const prompt = buildFirstAttemptPrompt({
+    const opts: FirstAttemptOptions = {
       repo: "/tmp/repo",
       programText: "# program\n\nDo useful work.",
       branch: "autotester/x",
@@ -14,7 +27,8 @@ describe("buildFirstAttemptPrompt", () => {
       bestMetric: 100,
       maxAttempts: 3,
       attemptNumber: 1,
-    });
+    };
+    const prompt = buildFirstAttemptPrompt(opts);
 
     expect(prompt).toContain("/tmp/repo");
     expect(prompt).toContain("# program");
@@ -41,17 +55,19 @@ describe("buildFirstAttemptPrompt", () => {
 
 describe("buildNextAttemptPrompt", () => {
   it("summarizes recent attempts and remaining budget", () => {
-    const prompt = buildNextAttemptPrompt({
+    const recent: AttemptHistoryEntry[] = [
+      { attempt: 1, status: "keep", metric: 1995, description: "a" },
+      { attempt: 2, status: "discard", metric: 1996, description: "b" },
+      { attempt: 3, status: "keep", metric: 1990, description: "c" },
+    ];
+    const opts: NextAttemptOptions = {
       attemptNumber: 4,
       remainingAttempts: 7,
       remainingSeconds: 1200,
       bestMetric: 1990,
-      recent: [
-        { attempt: 1, status: "keep", metric: 1995, description: "a" },
-        { attempt: 2, status: "discard", metric: 1996, description: "b" },
-        { attempt: 3, status: "keep", metric: 1990, description: "c" },
-      ],
-    });
+      recent,
+    };
+    const prompt = buildNextAttemptPrompt(opts);
     expect(prompt).toContain("Attempt 4");
     expect(prompt).toContain("Current best metric: 1990");
     expect(prompt).toContain("7 attempts");
@@ -61,13 +77,39 @@ describe("buildNextAttemptPrompt", () => {
   });
 });
 
+describe("buildBugfixRepairPrompt", () => {
+  it("tells the agent to amend only the failed bugfix attempt", () => {
+    const opts: BugfixRepairPromptOptions = {
+      attemptNumber: 2,
+      diagnosticPath: "/tmp/repo/.autotester/attempts/0002.json",
+      reason: "full gate failed",
+    };
+
+    const prompt = buildBugfixRepairPrompt(opts);
+
+    expect(prompt).toContain("Bugfix attempt 2");
+    expect(prompt).toContain("full gate failed");
+    expect(prompt).toContain("/tmp/repo/.autotester/attempts/0002.json");
+    expect(prompt).toContain("git commit --amend --no-edit");
+  });
+});
+
+describe("program paths", () => {
+  it("resolves the package root and bundled program path", () => {
+    expect(packageRoot()).toMatch(/autotester$/);
+    expect(bundledProgramPath("coverage-raiser")).toBe(join(packageRoot(), "programs", "coverage-raiser.md"));
+  });
+});
+
 describe("loadProgram", () => {
   it("prefers the target repo program.md", () => {
     const repo = mkdtempSync(join(tmpdir(), "autotester-"));
     writeFileSync(join(repo, "program.md"), "repo program", "utf8");
 
-    const program = loadProgram(repo);
+    const program: LoadedProgram = loadProgram(repo);
+    const scope: PromptScope = { readonly: [], editable: ["test/**"] };
 
+    expect(scope.editable).toEqual(["test/**"]);
     expect(program.path).toBe(join(repo, "program.md"));
     expect(program.text).toBe("repo program");
   });
