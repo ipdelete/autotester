@@ -13,6 +13,13 @@ The current Python rewrite supports two modes:
 - **Optimize mode**: lower a metric while keeping a gate green.
 - **Bugfix mode**: discover, test, fix, and prove one real bug at a time.
 
+## Attribution
+
+Autotester is based on ideas from Andrej Karpathy's
+[`autoresearch`](https://github.com/karpathy/autoresearch), especially the
+pattern of running an autonomous coding/research loop against a fixed program,
+recording attempts, and using deterministic evaluation to decide what to keep.
+
 ## Start here
 
 - [Quickstart](quickstart.md): run from GitHub with `uvx`, initialize a program,
