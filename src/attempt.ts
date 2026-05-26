@@ -69,13 +69,26 @@ export function requireBugfixManifest(manifest: AttemptManifest): Required<Pick<
   };
 }
 
-/** Read .autotester/attempt.json and delete it. */
-export function consumeAttemptManifest(repo: string): AttemptManifest | undefined {
+export type AttemptManifestReadResult =
+  | { ok: true; manifest?: AttemptManifest }
+  | { ok: false; error: string };
+
+/** Read .autotester/attempt.json and delete it. Never throws for malformed JSON. */
+export function consumeAttemptManifestResult(repo: string): AttemptManifestReadResult {
   const path = resolve(repo, ".autotester", "attempt.json");
-  if (!existsSync(path)) return undefined;
+  if (!existsSync(path)) return { ok: true };
   try {
-    return parseAttemptManifest(readFileSync(path, "utf8"));
+    return { ok: true, manifest: parseAttemptManifest(readFileSync(path, "utf8")) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
   } finally {
     try { rmSync(path); } catch { /* ignore */ }
   }
+}
+
+/** Read .autotester/attempt.json and delete it. Throws on malformed JSON. */
+export function consumeAttemptManifest(repo: string): AttemptManifest | undefined {
+  const result = consumeAttemptManifestResult(repo);
+  if (!result.ok) throw new Error(result.error);
+  return result.manifest;
 }

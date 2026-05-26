@@ -30,7 +30,7 @@ import { configToScope, loadConfig } from "./scope.js";
 import { runMetric, runShell } from "./metric.js";
 import { appendResultsRow, type AttemptStatus } from "./results.js";
 import { writeRunSummary, type RunSummary } from "./history.js";
-import { consumeAttemptManifest } from "./attempt.js";
+import { consumeAttemptManifestResult } from "./attempt.js";
 import { validateBugfixAttempt, writeBugfixDiagnostic, type RepairRecord } from "./bugfix.js";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -365,13 +365,37 @@ export async function runAutotester(options: RunOptions): Promise<number> {
         continue;
       }
 
-      const manifest = consumeAttemptManifest(repo);
-      let description = manifest?.description ?? "(no description)";
+      const manifestRead = consumeAttemptManifestResult(repo);
+      const manifest = manifestRead.ok ? manifestRead.manifest : undefined;
+      let description = manifestRead.ok
+        ? (manifest?.description ?? "(no description)")
+        : `invalid attempt manifest: ${manifestRead.error}`;
       let status: AttemptStatus;
       let metricValue: number;
       let attemptedCommit = headAfter;
 
-      if (mode === "bugfix") {
+      if (!manifestRead.ok) {
+        status = "crash";
+        metricValue = Number.POSITIVE_INFINITY;
+        if (mode === "bugfix") {
+          writeBugfixDiagnostic(repo, {
+            attempt,
+            status,
+            reason: description,
+            parent: headBefore,
+            child: headAfter,
+            description,
+            repaired: false,
+            repairCount: 0,
+            repairs: [],
+            commands: {},
+          });
+        }
+        process.stdout.write(`[harness] crash: ${description}; resetting\n`);
+        resetHard(repo, headBefore);
+        crashes += 1;
+        if (mode === "bugfix") noFindingStreak += 1;
+      } else if (mode === "bugfix") {
         process.stdout.write(`[harness] validating bugfix proof...\n`);
         let validation = validateBugfixAttempt({
           repo,
@@ -440,7 +464,8 @@ export async function runAutotester(options: RunOptions): Promise<number> {
               diagnostic,
             };
           } else {
-            const repairedManifest = consumeAttemptManifest(repo) ?? manifest;
+            const repairedManifestRead = consumeAttemptManifestResult(repo);
+            const repairedManifest = repairedManifestRead.ok ? (repairedManifestRead.manifest ?? manifest) : manifest;
             validation = validateBugfixAttempt({
               repo,
               attempt,

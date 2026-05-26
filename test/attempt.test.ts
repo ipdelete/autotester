@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseAttemptManifest, requireBugfixManifest } from "../src/attempt.js";
+import { consumeAttemptManifestResult, parseAttemptManifest, requireBugfixManifest } from "../src/attempt.js";
 
 describe("attempt manifest", () => {
   it("parses optimize descriptions", () => {
@@ -33,6 +36,16 @@ describe("attempt manifest", () => {
       test_files: ["tests/test_parser.py", 42],
       fix_files: ["src/parser.py"],
     }))).toThrow(/test_files\[1\]/);
+  });
+
+  it("returns an error instead of throwing when consuming malformed JSON", () => {
+    const repo = mkdtempSync(join(tmpdir(), "autotester-attempt-"));
+    const dir = join(repo, ".autotester");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "attempt.json"), '{"description":"bad" "missing comma"}', "utf8");
+    const result = consumeAttemptManifestResult(repo);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/JSON/);
   });
 
   it("rejects invalid parent failure regex", () => {
