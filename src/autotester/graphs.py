@@ -120,6 +120,37 @@ def attempt_graph(
     }
 
 
+def bugfix_attempt_graph(
+    repo: Path,
+    *,
+    attempt: int,
+    prompt: str,
+    timeout: float,
+) -> tuple[TaskGraph, dict[str, Task]]:
+    before = Task.bash(
+        f"set -euo pipefail\ngit -C {q(repo)} rev-parse HEAD",
+        title=f"bugfix attempt {attempt} before head",
+        timeout=10,
+    )
+    agent = Task.agent(prompt, title=f"bugfix agent attempt {attempt}", timeout=timeout)
+    after = Task.bash(
+        f"set -euo pipefail\ngit -C {q(repo)} rev-parse HEAD",
+        title=f"bugfix attempt {attempt} after head",
+        timeout=10,
+    )
+    clean = Task.bash(
+        f"set -euo pipefail\ntest -z \"$(git -C {q(repo)} status --short --untracked-files=no)\"",
+        title=f"bugfix clean tracked worktree attempt {attempt}",
+        timeout=10,
+    )
+    graph = TaskGraph(title=f"autotester bugfix attempt {attempt}")
+    graph.add(before)
+    graph.add(agent, after=[before])
+    graph.add(after, after=[agent])
+    graph.add(clean, after=[after])
+    return graph, {"before": before, "agent": agent, "after": after, "clean": clean}
+
+
 def reset_graph(repo: Path, commit: str, attempt: int) -> TaskGraph:
     reset = Task.bash(
         f"set -euo pipefail\ngit -C {q(repo)} reset --hard {q(commit)}",
