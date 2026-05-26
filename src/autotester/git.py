@@ -66,4 +66,7 @@ def reset_hard(repo: Path, commit: str) -> None:
 
 
 def git_path(repo: Path, relative: str) -> Path:
-    return Path(run_git(repo, "rev-parse", "--git-path", relative).stdout.strip())
+    path = Path(run_git(repo, "rev-parse", "--git-path", relative).stdout.strip())
+    if path.is_absolute():
+        return path
+    return repo / path
