@@ -8,3 +8,9 @@ dist/
 *.log
 .env
 .env.*
+
+# Local autotester run artifacts
+.autotester/
+.autotester.json
+program.md
+results.tsv
