@@ -1,190 +1,166 @@
 # autotester
 
-`autotester` runs program-driven coding-agent loops for conservative repository
-improvement.
+`autotester` is a Python/uv CLI backed by
+[`ttasks`](https://github.com/ipdelete/ttasks) and the GitHub Copilot SDK.
 
-The product is the program: `program.md` tells the agent what kind of small,
-conservative improvement to attempt. The CLI is intentionally thin: `init`
-copies a starter template from `programs/` into the target repository as
-`program.md`; you edit that file for the repo; `run` drives a Pi coding-agent
-session and the harness keeps or discards each committed attempt.
+The current rewrite supports **optimize mode** only. It keeps the repo-local
+`program.md` contract, but the run ledger is now ttasks' `SQLiteStore` rather
+than `results.tsv` files.
 
-## Requirements
+## Run with uvx
 
-- Node.js 22.19+
-- `pnpm`
-- Pi authentication/model configuration. Run `pi` and use `/login`, or configure
-  provider API keys supported by Pi.
-
-## Usage
-
-From a clone of this repository:
+Run directly from GitHub:
 
 ```bash
-pnpm install
-pnpm build
-npm link
+uvx --from git+https://github.com/ipdelete/autotester.git autotester programs
 ```
 
-Initialize a repository with the default starter (`programs/simplifier.md`):
+Run from a branch or tag:
 
 ```bash
-autotester init ~/src/my-repo
-$EDITOR ~/src/my-repo/program.md   # set the real gate, metric paths, repo rules
+uvx --from git+https://github.com/ipdelete/autotester.git@rewrite/python-uv-ttasks autotester --help
 ```
 
-Or choose a different starter:
+If `uvx` cannot find `uv`, ensure both commands resolve correctly:
 
 ```bash
-autotester init ~/src/my-repo --program programs/type-tightener.md
+which uv uvx
+uvx --version
 ```
 
-Run a bounded local-only loop after reviewing `program.md`:
+In this environment, `uvx` expected a sibling `uv` at `~/.local/bin/uv`; a
+symlink to the system `uv` fixed it:
 
 ```bash
-autotester run ~/src/my-repo --tag simplify-1 --max-attempts 10
+ln -sfn /usr/bin/uv ~/.local/bin/uv
 ```
 
-By default, `run` refuses to start if the target repository has uncommitted
-tracked changes. Use `--allow-dirty` only when the program should explicitly
-preserve existing work.
+## Install as a uv tool
+
+Install persistently from GitHub:
+
+```bash
+uv tool install git+https://github.com/ipdelete/autotester.git
+```
+
+Install from a branch or tag:
+
+```bash
+uv tool install --force git+https://github.com/ipdelete/autotester.git@rewrite/python-uv-ttasks
+```
+
+Then run:
+
+```bash
+autotester programs
+autotester init --program simplifier
+autotester run --tag simplify-001 --max-attempts 5
+autotester history
+```
+
+## Development install
+
+```bash
+uv sync --dev
+```
+
+When working against a local ttasks checkout during development:
+
+```bash
+uv run --with 'ttasks @ file:///home/cip/src/ttasks' autotester programs
+```
 
 ## Commands
 
-```text
-autotester init    <repo> [--program <path>] [--force]
-                          [--editable <glob>]... [--readonly <glob>]...
-autotester run     <repo> [--program <path>]
-                          [--max-attempts <n>] [--time-budget <seconds>]
-                          [--max-no-finding-attempts <n>]
-                          [--attempt-timeout <seconds>] [--allow-dirty]
-                          [--tag <name>]
-                          [--provider <id>] [--model <pattern>] [--thinking <level>]
-autotester history <repo>
+### List bundled programs
+
+```bash
+autotester programs
 ```
 
-The loop terminates on whichever comes first: `--max-attempts`,
-`--time-budget`, bugfix-mode `--max-no-finding-attempts`, or the agent
-declining to commit in optimize mode (its stop signal).
-`--attempt-timeout` is the wall-clock cap the harness applies to each
-individual `gate` or `metric` shell invocation.
+### Initialize a repo-local program
 
-`--tag <name>` creates a fresh `autotester/<name>` branch from current
-HEAD and refuses to reuse an existing tag.
+```bash
+autotester init --program simplifier
+```
 
-The model triple is resolved per field with this priority: CLI flag >
-program front matter > built-in default (`github-copilot/claude-opus-4.7`,
-no thinking level).
-
-## Starter programs
-
-`programs/` contains starter templates, not magic roles. Pick one at `init`
-time, then edit the generated `program.md` for your repository.
-
-| Template | Purpose |
-| --- | --- |
-| `programs/simplifier.md` | Default. Reduce source size/complexity without behavior changes. |
-| `programs/type-tightener.md` | Add/tighten static types without runtime changes. |
-| `programs/coverage-raiser.md` | Add tests that reduce uncovered behavior. |
-| `programs/doc-writer.md` | Add concise, accurate public documentation/docstrings. |
-| `programs/dep-pruner.md` | Remove unused imports/dependencies conservatively. |
-| `programs/bug-finder.md` | Probe behavior like a QA tester; add a regression test and fix for each verified latent bug. |
-
-## Program contract
-
-A `program.md` declares two shell snippets in YAML front matter: a `gate`
-that must exit 0, and a `metric` that prints `metric: <float>` to stdout
-(lower is better). The harness — not the agent — runs both between
-attempts and decides keep/discard/crash. Example:
+This copies a bundled program template to `program.md` in the target repo. Edit
+the front matter before running:
 
 ```yaml
 ---
 provider: github-copilot
-model: claude-opus-4.7
+model: gpt-5.5
+thinking: medium
 gate: |
-  set -e
   uv run pytest -q
-  uv run ruff check .
 metric: |
-  set -e
-  python3 - <<'PY'
-  import pathlib
-  n = sum(1 for p in pathlib.Path("src").rglob("*.py")
-          for line in p.read_text(errors="ignore").splitlines()
-          if line.strip() and not line.strip().startswith("#"))
-  print(f"metric: {n}")
-  PY
+  python metric.py
 ---
-
-# program body: what kinds of changes to propose, what's out of bounds.
 ```
 
-Per-attempt protocol enforced by the harness in default `mode: optimize`:
+Lower metric values are better.
 
-1. Agent edits files.
-2. Agent writes `.autotester/attempt.json` with `{"description": "..."}`.
-3. Agent commits.
-4. Harness runs `gate` then `metric`, appends one row to `results.tsv`,
-   and either keeps the commit (metric strictly improved) or `git
-   reset --hard`s it.
-5. If HEAD doesn't move after a turn, the harness treats it as the
-   agent's stop signal and ends the run.
+### Run optimize mode
 
-## Bugfix mode
-
-`programs/bug-finder.md` uses `mode: bugfix`. In this mode the harness supplies
-the metric:
-
-```text
-metric = - verified_regression_fixes
+```bash
+autotester run --tag simplify-001 --max-attempts 5
 ```
 
-Lower is better: `-3` means the run has found, tested, and fixed three latent
-defects. Bugfix mode also supports `--max-no-finding-attempts <n>` (default 3),
-which stops after N consecutive attempts without a kept verified finding.
+For each run, autotester:
 
-Bugfix attempts require a richer `.autotester/attempt.json`:
+1. validates the baseline gate and metric,
+2. opens one long-lived `CopilotAgentSession`,
+3. builds a persisted ttasks graph for each attempt,
+4. lets the agent make at most one committed improvement,
+5. runs the gate and metric in the graph,
+6. adjudicates keep/discard in Python,
+7. persists the adjudication as another ttasks graph.
 
-```json
-{
-  "description": "Fix empty input crash in parser",
-  "repro_command": "python - <<'PY'\n...\nPY",
-  "test_command": "pytest tests/test_parser.py::test_empty_input -q",
-  "test_files": ["tests/test_parser.py"],
-  "fix_files": ["src/parser.py"],
-  "parent_failure_pattern": "AssertionError|ValueError"
-}
+### View history
+
+```bash
+autotester history
 ```
 
-The harness keeps the commit only if exactly one commit was made, protected
-harness files were not touched, declared files match the diff, the repro fails
-in a temp worktree at the parent commit, the same repro passes in a temp
-worktree at the child commit, the targeted regression test passes, and the full
-`gate` passes. If proof + targeted test pass but the full gate fails, the
-harness gives the agent one repair turn to fix lint/format/gate fallout by
-amending the same commit, then revalidates. Validation details are written to
-`.autotester/attempts/*.json`, including whether repair was used and the
-pre-repair failure details. Harness shell commands set `UV_LINK_MODE=copy` by
-default to keep uv temp-worktree diagnostics quiet.
+History is rendered from adjudication tasks in the ttasks SQLite database.
+There is no primary `results.tsv` ledger in the Python rewrite.
 
-## Files in target repos
+## Storage
 
-- `program.md` — repo-specific agent policy and gate/metric contract.
-- `results.tsv` — one row per attempt. Header is
-  `attempt\telapsed_s\tmetric\tstatus\tcommit\tdescription`. `commit` is
-  always the attempted SHA (reflog-recoverable even when status is
-  `discard` or `crash`).
-- `.autotester.json` — scope declaration (only present when `init` was
-  given `--editable`/`--readonly`).
-- `.autotester/runs/*.json` — one machine-readable summary per run, used
-  by `autotester history`.
-- `.autotester/attempts/*.json` — per-attempt validation diagnostics for
-  bugfix mode.
-- `.autotester/attempt.json` — transient; the agent writes it before each
-  commit, the harness consumes it.
-- `.git/hooks/pre-commit` — installed by `init` when scope is declared.
-  Rejects staged paths that violate the scope.
+By default, the SQLite task/graph ledger is stored under git metadata:
 
-## License
+```bash
+git rev-parse --git-path autotester/ttasks.db
+```
 
-MIT
+This keeps autotester state outside the worktree, so no `.autotester/` directory
+or `results.tsv` file is required.
+
+## Development checks
+
+```bash
+uv run ruff check src/autotester tests
+uv run pytest -q
+uv run ty check src/autotester tests
+```
+
+## Status
+
+Implemented:
+
+- Python/uv project skeleton
+- `autotester init`
+- `autotester programs`
+- optimize-mode `autotester run`
+- `autotester history`
+- ttasks `SQLiteStore` adjudication history
+- `uvx` / `uv tool install` support from GitHub
+
+Not yet rewritten:
+
+- bugfix mode
+- scope hooks
+- repair turns
+- no-finding budget
+- richer history/detail inspection

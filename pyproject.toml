@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autotester"
+dynamic = ["version"]
+description = "Program-driven coding-agent loops backed by ttasks"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ttasks>=0.4.0",
+    "github-copilot-sdk>=0.1.0",
+]
+
+[project.scripts]
+autotester = "autotester.cli:main"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/autotester/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autotester"]
+artifacts = ["programs"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "ruff>=0.15.0",
+    "ty>=0.0.39",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ty.environment]
+python-version = "3.12"

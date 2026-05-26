@@ -1,16 +1,42 @@
-# Dependencies
-node_modules/
+# Virtual environments / dependency caches
+.venv/
+venv/
+ENV/
 
-# Build output
-dist/
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.ty/
+.mypy_cache/
+.pyre/
+.pytype/
+.pyright/
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
 coverage/
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Build output / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+src/autotester/_version.py
 
 # Logs and local environment
 *.log
 .env
 .env.*
 
-# Local autotester run artifacts
+# Local autotester run artifacts from old/manual runs
 .autotester/
 .autotester.json
 program.md
