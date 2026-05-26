@@ -28,6 +28,8 @@ artifacts = ["programs"]
 
 [dependency-groups]
 dev = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9,<9.7",
     "pytest>=9.0.0",
     "ruff>=0.15.0",
     "ty>=0.0.39",
