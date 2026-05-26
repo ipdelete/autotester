@@ -32,7 +32,7 @@ def bugfix_prompt(program: Program, *, attempt: int, verified_fixes: int) -> str
     return dedent(
         f"""
         You are running inside autotester bugfix mode. Find exactly one real bug,
-        add a regression test, fix it, write .autotester/attempt.json, commit once, and stop.
+        add a regression test, fix it, commit once, return a JSON manifest, and stop.
 
         Harness contract:
         - The harness validates the commit in detached parent/child worktrees.
@@ -41,6 +41,11 @@ def bugfix_prompt(program: Program, *, attempt: int, verified_fixes: int) -> str
         - Metric is -verified_regression_fixes; current verified fixes: {verified_fixes}.
         - This is attempt {attempt}.
         - If you cannot find a concrete reproducible bug, do not commit.
+        - After committing, make your final response include exactly one JSON object
+          with description, repro_command, test_command, test_files, fix_files, and
+          optional parent_failure_pattern.
+        - Do not write .autotester/attempt.json; the harness reads the manifest from
+          your persisted assistant output.
         - Do not edit autotester's task database or run history.
 
         Program instructions from {program.path}:

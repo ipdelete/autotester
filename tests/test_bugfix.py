@@ -1,4 +1,3 @@
-import json
 import subprocess
 from pathlib import Path
 
@@ -6,38 +5,48 @@ import pytest
 from ttasks import SQLiteStore, TaskExecutor
 
 from autotester.bugfix import (
-    load_attempt_manifest,
+    manifest_from_dict,
+    parse_attempt_manifest,
     validate_bugfix_attempt,
     validate_manifest_and_diff,
 )
 
+MANIFEST = {
+    "description": "Fix parser empty input",
+    "repro_command": "python repro.py",
+    "test_command": "pytest tests/test_parser.py -q",
+    "test_files": ["tests/test_parser.py"],
+    "fix_files": ["src/parser.py"],
+    "parent_failure_pattern": "AssertionError",
+}
 
-def test_load_attempt_manifest(tmp_path: Path):
-    attempt_dir = tmp_path / ".autotester"
-    attempt_dir.mkdir()
-    (attempt_dir / "attempt.json").write_text(json.dumps({
-        "description": "Fix parser empty input",
-        "repro_command": "python repro.py",
-        "test_command": "pytest tests/test_parser.py -q",
-        "test_files": ["tests/test_parser.py"],
-        "fix_files": ["src/parser.py"],
-        "parent_failure_pattern": "AssertionError",
-    }))
 
-    manifest = load_attempt_manifest(tmp_path)
+def test_parse_attempt_manifest_from_agent_output():
+    manifest = parse_attempt_manifest(
+        "Committed the fix.\n\n"
+        "```json\n"
+        '{"description":"Fix parser empty input",'
+        '"repro_command":"python repro.py",'
+        '"test_command":"pytest tests/test_parser.py -q",'
+        '"test_files":["tests/test_parser.py"],'
+        '"fix_files":["src/parser.py"],'
+        '"parent_failure_pattern":"AssertionError"}'
+        "\n```\n"
+    )
 
     assert manifest.description == "Fix parser empty input"
     assert manifest.test_files == ("tests/test_parser.py",)
     assert manifest.parent_failure_pattern == "AssertionError"
 
 
-def test_load_attempt_manifest_rejects_missing_fields(tmp_path: Path):
-    attempt_dir = tmp_path / ".autotester"
-    attempt_dir.mkdir()
-    (attempt_dir / "attempt.json").write_text("{}")
+def test_parse_attempt_manifest_rejects_missing_manifest():
+    with pytest.raises(ValueError, match="did not contain"):
+        parse_attempt_manifest("I could not find a bug.")
 
+
+def test_manifest_from_dict_rejects_missing_fields():
     with pytest.raises(ValueError, match="missing required fields"):
-        load_attempt_manifest(tmp_path)
+        manifest_from_dict({})
 
 
 def test_validate_manifest_and_diff_requires_declared_files(tmp_path: Path):
@@ -58,7 +67,7 @@ def test_validate_manifest_and_diff_requires_declared_files(tmp_path: Path):
     _git(tmp_path, "commit", "-m", "fix")
     after = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
-    manifest = load_attempt_manifest_from_dict(tmp_path, {
+    manifest = manifest_from_dict({
         "description": "Fix parser",
         "repro_command": "python repro.py",
         "test_command": "pytest tests/test_parser.py -q",
@@ -67,13 +76,6 @@ def test_validate_manifest_and_diff_requires_declared_files(tmp_path: Path):
     })
 
     validate_manifest_and_diff(tmp_path, before, after, manifest)
-
-
-def load_attempt_manifest_from_dict(repo: Path, data: dict):
-    attempt_dir = repo / ".autotester"
-    attempt_dir.mkdir(exist_ok=True)
-    (attempt_dir / "attempt.json").write_text(json.dumps(data))
-    return load_attempt_manifest(repo)
 
 
 def test_validate_bugfix_attempt_proves_parent_fail_child_pass(tmp_path: Path):
@@ -96,7 +98,7 @@ def test_validate_bugfix_attempt_proves_parent_fail_child_pass(tmp_path: Path):
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "fix add")
     after = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    manifest = load_attempt_manifest_from_dict(repo, {
+    manifest = manifest_from_dict({
         "description": "Fix add subtraction bug",
         "repro_command": "python - <<'PY'\nfrom calc import add\nassert add(2, 3) == 5\nPY",
         "test_command": "python -m pytest test_calc.py -q",

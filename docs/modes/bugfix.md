@@ -29,7 +29,9 @@ Lower is better. A run with three verified fixes has metric `-3`.
 
 ## Attempt manifest
 
-The agent must write `.autotester/attempt.json` before committing:
+After committing, the agent must include one JSON manifest object in its final
+assistant response. The harness reads this from the persisted ttasks agent task
+output; no `.autotester/attempt.json` file is needed.
 
 ```json
 {
@@ -53,6 +55,8 @@ Required fields:
 Optional:
 
 - `parent_failure_pattern`
+
+The committed diff must contain only the declared regression test and fix files.
 
 ## Validation
 

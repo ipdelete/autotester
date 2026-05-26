@@ -17,7 +17,7 @@ from ttasks import (
 )
 
 from . import git
-from .bugfix import load_attempt_manifest, validate_bugfix_attempt
+from .bugfix import parse_attempt_manifest, validate_bugfix_attempt
 from .graphs import (
     Adjudication,
     adjudication_graph,
@@ -248,7 +248,7 @@ def _run_bugfix_attempt(
             "attempt graph failed", elapsed_s, graph.id,
         )
     try:
-        manifest = load_attempt_manifest(repo)
+        manifest = parse_attempt_manifest(task_output(tasks["agent"]))
         validation = validate_bugfix_attempt(
             repo=repo,
             store=store,

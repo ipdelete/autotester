@@ -42,16 +42,25 @@ REQUIRED_MANIFEST_FIELDS = {
 }
 
 
-def load_attempt_manifest(repo: Path) -> AttemptManifest:
-    path = repo / ".autotester" / "attempt.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ValueError("missing .autotester/attempt.json") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"malformed .autotester/attempt.json: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError("attempt manifest must be a JSON object")
+def parse_attempt_manifest(text: str) -> AttemptManifest:
+    """Extract the last valid bugfix manifest JSON object from agent output."""
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.keys() >= REQUIRED_MANIFEST_FIELDS:
+            candidates.append(value)
+    if not candidates:
+        raise ValueError("agent output did not contain a valid bugfix manifest JSON object")
+    return manifest_from_dict(candidates[-1])
+
+
+def manifest_from_dict(raw: dict[str, Any]) -> AttemptManifest:
     missing = sorted(REQUIRED_MANIFEST_FIELDS - raw.keys())
     if missing:
         raise ValueError(f"attempt manifest missing required fields: {', '.join(missing)}")
@@ -85,6 +94,14 @@ def validate_manifest_and_diff(
         raise ValueError(f"bugfix attempts must create exactly one commit; got {count}")
     changed = set(_changed_files(repo, before, after))
     allowed = set(manifest.test_files) | set(manifest.fix_files)
+    protected = [
+        path for path in changed
+        if path.startswith(".autotester/") or path == "program.md"
+    ]
+    if protected:
+        raise ValueError(
+            "commit changed protected harness files: " + ", ".join(sorted(protected))
+        )
     extra = sorted(changed - allowed)
     if extra:
         raise ValueError(f"commit changed files not declared in manifest: {', '.join(extra)}")
@@ -92,12 +109,6 @@ def validate_manifest_and_diff(
         raise ValueError("commit did not change any declared test_files")
     if not set(manifest.fix_files) & changed:
         raise ValueError("commit did not change any declared fix_files")
-    protected = [
-        path for path in changed
-        if path.startswith(".autotester/") or path == "program.md"
-    ]
-    if protected:
-        raise ValueError(f"commit changed protected harness files: {', '.join(sorted(protected))}")
 
 
 def validate_bugfix_attempt(

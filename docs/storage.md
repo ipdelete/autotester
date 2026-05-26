@@ -49,6 +49,6 @@ autotester history --db /tmp/autotester.db
 
 ## Worktree files
 
-The bugfix agent writes `.autotester/attempt.json` in the worktree as a manifest
-for the current candidate. The harness reads it but does not use `.autotester/`
-as the durable run ledger.
+Autotester does not require worktree-local run artifacts. Bugfix manifests are
+read from persisted agent task output in the SQLite ledger, not from an
+`.autotester/` file.

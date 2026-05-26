@@ -76,8 +76,8 @@ One attempt is exactly one verified-bugfix candidate:
 2. Write an inline `repro_command` that fails before the fix and passes after.
 3. Add a committed regression test.
 4. Fix the bug minimally.
-5. Write `.autotester/attempt.json`.
-6. Commit exactly one commit containing only the declared test and fix files.
+5. Commit exactly one commit containing only the declared test and fix files.
+6. In your final assistant response, return a JSON manifest for the harness.
 7. Stop so the harness can validate.
 
 The harness validates in temp worktrees:
@@ -94,7 +94,9 @@ one repair turn. On that turn, fix only the gate issue in the declared files and
 
 ## Attempt manifest
 
-Before committing, write `.autotester/attempt.json` like:
+After committing, include exactly one JSON object like the example below in your
+final assistant response. Do not write `.autotester/attempt.json`; the harness
+reads this manifest from your persisted assistant output.
 
 ```json
 {
@@ -130,8 +132,8 @@ Optional:
 - Treating missing docs, style disagreements, or subjective API taste as bugs.
 - Changing behavior unless the previous behavior is clearly wrong by docs,
   tests, invariants, error messages, or obvious safety expectations.
-- Editing `program.md`, `results.tsv`, `.autotester.json`, `.autotester/runs/**`,
-  `.autotester/attempts/**`, or other harness control files.
+- Editing `program.md`, `results.tsv`, `.autotester/**`, or other harness
+  control files.
 
 If you cannot produce a concrete reproduction and fix, keep probing; do not
 commit. If you truly cannot produce any candidate, say so and do not commit.
