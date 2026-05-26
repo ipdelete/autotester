@@ -17,11 +17,13 @@ from ttasks import (
 )
 
 from . import git
+from .bugfix import load_attempt_manifest, validate_bugfix_attempt
 from .graphs import (
     Adjudication,
     adjudication_graph,
     attempt_graph,
     baseline_graph,
+    bugfix_attempt_graph,
     elapsed_since,
     parse_metric_output,
     reset_graph,
@@ -29,8 +31,8 @@ from .graphs import (
     task_output,
 )
 from .history import default_db_path
-from .program import load_program, require_str
-from .prompt import attempt_prompt
+from .program import Program, load_program, require_str
+from .prompt import attempt_prompt, bugfix_prompt
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_THINKING = "medium"
@@ -44,6 +46,7 @@ class RunOptions:
     program: str | None = None
     max_attempts: int = 5
     attempt_timeout: float = DEFAULT_ATTEMPT_TIMEOUT
+    max_no_finding_attempts: int = 3
     allow_dirty: bool = False
     tag: str | None = None
     model: str | None = None
@@ -59,13 +62,13 @@ def run(options: RunOptions) -> int:
     program = load_program(repo, options.program)
     fm = program.front_matter
     mode = str(fm.get("mode", "optimize"))
-    if mode != "optimize":
-        raise RuntimeError("Python rewrite currently supports only mode: optimize")
+    if mode not in {"optimize", "bugfix"}:
+        raise RuntimeError("mode must be 'optimize' or 'bugfix'")
     provider = str(fm.get("provider", "github-copilot"))
     if provider != "github-copilot":
         raise RuntimeError("Python rewrite currently supports only provider: github-copilot")
     gate = require_str(fm, "gate")
-    metric = require_str(fm, "metric")
+    metric = require_str(fm, "metric") if mode == "optimize" else "printf '0\\n'"
     model = options.model or str(fm.get("model", DEFAULT_MODEL))
     thinking = options.thinking or str(fm.get("thinking", DEFAULT_THINKING))
     if thinking not in THINKING_LEVELS:
@@ -95,7 +98,10 @@ def run(options: RunOptions) -> int:
     print(f"database: {db_path}")
     print(f"model: {model}")
     print(f"thinking: {thinking}")
+    print(f"mode: {mode}")
     print(f"max attempts: {options.max_attempts}")
+    if mode == "bugfix":
+        print(f"max no-finding attempts: {options.max_no_finding_attempts}")
 
     with CopilotAgentSession(
         model=model,
@@ -124,40 +130,156 @@ def run(options: RunOptions) -> int:
         ))
         print(f"[harness] baseline metric: {best_metric}")
 
+        verified_fixes = 0
+        consecutive_no_finding = 0
         for attempt in range(1, options.max_attempts + 1):
-            prompt = attempt_prompt(program, attempt=attempt, best_metric=best_metric)
-            graph, tasks = attempt_graph(
-                repo,
-                attempt=attempt,
-                prompt=prompt,
-                gate=gate,
-                metric=metric,
-                timeout=options.attempt_timeout,
-            )
-            started = time.monotonic()
-            save_and_run(graph, executor, store)
-            outcome = _adjudicate(
-                repo=repo,
-                executor=executor,
-                store=store,
-                graph_id=graph.id,
-                tasks=tasks,
-                attempt=attempt,
-                elapsed_s=elapsed_since(started),
-                best_metric=best_metric,
-            )
+            if mode == "bugfix":
+                outcome = _run_bugfix_attempt(
+                    repo=repo,
+                    program=program,
+                    executor=executor,
+                    store=store,
+                    gate=gate,
+                    attempt=attempt,
+                    verified_fixes=verified_fixes,
+                    timeout=options.attempt_timeout,
+                )
+                if outcome.status == "keep":
+                    verified_fixes += 1
+                    best_metric = outcome.metric
+                    consecutive_no_finding = 0
+                elif outcome.description == "no finding produced":
+                    consecutive_no_finding += 1
+                    if consecutive_no_finding >= options.max_no_finding_attempts:
+                        _record(executor, store, outcome)
+                        print(
+                            f"[harness] attempt {attempt}: {outcome.status} "
+                            f"metric={outcome.metric:g} {outcome.description}"
+                        )
+                        print("[harness] stopping: no-finding budget exhausted")
+                        break
+                else:
+                    consecutive_no_finding = 0
+            else:
+                outcome = _run_optimize_attempt(
+                    repo=repo,
+                    program=program,
+                    executor=executor,
+                    store=store,
+                    gate=gate,
+                    metric=metric,
+                    attempt=attempt,
+                    best_metric=best_metric,
+                    timeout=options.attempt_timeout,
+                )
+                if outcome.status == "keep":
+                    best_metric = outcome.metric
             _record(executor, store, outcome)
             print(
                 f"[harness] attempt {attempt}: {outcome.status} "
                 f"metric={outcome.metric:g} {outcome.description}"
             )
-            if outcome.status == "keep":
-                best_metric = outcome.metric
 
     return 0
 
 
-def _adjudicate(
+def _run_optimize_attempt(
+    *,
+    repo: Path,
+    program: Program,
+    executor: TaskExecutor,
+    store: SQLiteStore,
+    gate: str,
+    metric: str,
+    attempt: int,
+    best_metric: float,
+    timeout: float,
+) -> Adjudication:
+    prompt = attempt_prompt(program, attempt=attempt, best_metric=best_metric)
+    graph, tasks = attempt_graph(
+        repo,
+        attempt=attempt,
+        prompt=prompt,
+        gate=gate,
+        metric=metric,
+        timeout=timeout,
+    )
+    started = time.monotonic()
+    save_and_run(graph, executor, store)
+    return _adjudicate_optimize(
+        repo=repo,
+        executor=executor,
+        store=store,
+        graph_id=graph.id,
+        tasks=tasks,
+        attempt=attempt,
+        elapsed_s=elapsed_since(started),
+        best_metric=best_metric,
+    )
+
+
+def _run_bugfix_attempt(
+    *,
+    repo: Path,
+    program: Program,
+    executor: TaskExecutor,
+    store: SQLiteStore,
+    gate: str,
+    attempt: int,
+    verified_fixes: int,
+    timeout: float,
+) -> Adjudication:
+    prompt = bugfix_prompt(program, attempt=attempt, verified_fixes=verified_fixes)
+    graph, tasks = bugfix_attempt_graph(repo, attempt=attempt, prompt=prompt, timeout=timeout)
+    started = time.monotonic()
+    save_and_run(graph, executor, store)
+    elapsed_s = elapsed_since(started)
+    before = task_output(tasks["before"])
+    after = task_output(tasks["after"]) if tasks["after"].status is TaskStatus.SUCCEEDED else before
+    if after == before:
+        return Adjudication(
+            "attempt", attempt, "discard", float("inf"), before[:12],
+            "no finding produced", elapsed_s, graph.id,
+        )
+    if tasks["clean"].status is not TaskStatus.SUCCEEDED:
+        save_and_run(reset_graph(repo, before, attempt), executor, store)
+        return Adjudication(
+            "attempt", attempt, "discard", float("inf"), before[:12],
+            "attempt graph failed", elapsed_s, graph.id,
+        )
+    try:
+        manifest = load_attempt_manifest(repo)
+        validation = validate_bugfix_attempt(
+            repo=repo,
+            store=store,
+            executor=executor,
+            before=before,
+            after=after,
+            attempt=attempt,
+            gate=gate,
+            manifest=manifest,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        save_and_run(reset_graph(repo, before, attempt), executor, store)
+        return Adjudication(
+            "attempt", attempt, "discard", float("inf"), before[:12],
+            f"bugfix validation failed: {exc}", elapsed_s, graph.id,
+        )
+    if not validation.ok:
+        save_and_run(reset_graph(repo, before, attempt), executor, store)
+        return Adjudication(
+            "attempt", attempt, "discard", float("inf"), before[:12],
+            "bugfix validation graph failed", elapsed_s, validation.graph_id or graph.id,
+        )
+    metric = -(verified_fixes + 1)
+    return Adjudication(
+        "attempt", attempt, "keep", float(metric), after[:12],
+        validation.description, elapsed_s, validation.graph_id or graph.id,
+    )
+
+
+def _adjudicate_optimize(
     *,
     repo: Path,
     executor: TaskExecutor,

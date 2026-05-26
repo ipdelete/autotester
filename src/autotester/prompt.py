@@ -26,3 +26,25 @@ def attempt_prompt(program: Program, *, attempt: int, best_metric: float) -> str
         {program.body.strip()}
         """
     ).strip()
+
+
+def bugfix_prompt(program: Program, *, attempt: int, verified_fixes: int) -> str:
+    return dedent(
+        f"""
+        You are running inside autotester bugfix mode. Find exactly one real bug,
+        add a regression test, fix it, write .autotester/attempt.json, commit once, and stop.
+
+        Harness contract:
+        - The harness validates the commit in detached parent/child worktrees.
+        - Parent repro must fail on the pre-fix commit.
+        - Child repro, targeted test, and full gate must pass on the new commit.
+        - Metric is -verified_regression_fixes; current verified fixes: {verified_fixes}.
+        - This is attempt {attempt}.
+        - If you cannot find a concrete reproducible bug, do not commit.
+        - Do not edit autotester's task database or run history.
+
+        Program instructions from {program.path}:
+
+        {program.body.strip()}
+        """
+    ).strip()

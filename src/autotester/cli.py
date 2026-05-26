@@ -23,11 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     programs = sub.add_parser("programs", help="list bundled program templates")
     programs.set_defaults(command="programs")
 
-    run_p = sub.add_parser("run", help="run optimize-mode autotester")
+    run_p = sub.add_parser("run", help="run autotester")
     run_p.add_argument("--repo", default=".")
     run_p.add_argument("--program")
     run_p.add_argument("--max-attempts", type=int, default=5)
     run_p.add_argument("--attempt-timeout", type=float, default=600.0)
+    run_p.add_argument("--max-no-finding-attempts", type=int, default=3)
     run_p.add_argument("--allow-dirty", action="store_true")
     run_p.add_argument("--tag")
     run_p.add_argument("--model")
@@ -66,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
                     program=args.program,
                     max_attempts=args.max_attempts,
                     attempt_timeout=args.attempt_timeout,
+                    max_no_finding_attempts=args.max_no_finding_attempts,
                     allow_dirty=args.allow_dirty,
                     tag=args.tag,
                     model=args.model,

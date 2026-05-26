@@ -25,14 +25,10 @@ latent defect at a time, add a regression test, fix the bug, and commit exactly
 one test+fix commit. The harness will prove whether the attempt counts.
 
 Before running, the human should edit the front-matter `gate` to the repo's
-normal full correctness gate. For this starter, initialize with source and tests
-editable, for example:
+normal full correctness gate. Initialize a repo-local bug-finder program with:
 
 ```bash
-autotester init ~/src/my-repo \
-  --program programs/bug-finder.md \
-  --editable 'src/**' \
-  --editable 'tests/**'
+autotester init --program bug-finder
 ```
 
 ## Metric
