@@ -1,5 +1,8 @@
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { formatHistoryTable, type RunSummary } from "../src/history.js";
+import { formatHistoryTable, writeRunSummary, type RunSummary } from "../src/history.js";
 
 function summary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
@@ -29,5 +32,13 @@ describe("formatHistoryTable", () => {
     const table = formatHistoryTable([summary()]);
     expect(table).toContain("REP");
     expect(table).toContain("  1  ");
+  });
+
+  it("writes run summaries for tags that contain slashes", () => {
+    const repo = mkdtempSync(join(tmpdir(), "autotester-history-"));
+    const path = writeRunSummary(repo, summary({ tag: "feature/bugfix" }));
+
+    expect(path).toContain("feature-bugfix.json");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ tag: "feature/bugfix" });
   });
 });

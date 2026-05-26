@@ -69,19 +69,39 @@ if [ ! -f "$config" ]; then
   exit 0
 fi
 
-# Extract a JSON string array by key. Tolerates whitespace/newlines.
+# Extract a JSON string array by key. Tolerates whitespace/newlines and
+# commas inside quoted glob strings.
 # Usage: extract_array <key>
 extract_array() {
   key="$1"
-  tr -d '\\n' < "$config" \\
-    | sed -n "s/.*\\\"$key\\\"[[:space:]]*:[[:space:]]*\\\\[\\\\([^]]*\\\\)\\\\].*/\\\\1/p" \\
-    | tr ',' '\\n' \\
-    | sed -e 's/^[[:space:]]*\\\"//' -e 's/\\\"[[:space:]]*$//' \\
-    | sed '/^$/d'
+  awk -v key="$key" '
+    { text = text $0 "\\n" }
+    END {
+      pattern = "\\\"" key "\\\"[[:space:]]*:[[:space:]]*\\\\["
+      if (match(text, pattern) == 0) exit 0
+      s = substr(text, RSTART + RLENGTH)
+      depth = 1; in_str = 0; esc = 0; val = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (!in_str) {
+          if (c == "[") { depth++; continue }
+          if (c == "]") { depth--; if (depth == 0) exit 0; continue }
+          if (depth == 1 && c == "\\\"") { in_str = 1; esc = 0; val = "" }
+          continue
+        }
+        if (esc) { val = val c; esc = 0; continue }
+        if (c == "\\\\") { esc = 1; continue }
+        if (c == "\\\"") { print val; in_str = 0; continue }
+        val = val c
+      }
+    }
+  ' "$config"
 }
 
-readonly_globs=$(extract_array readonly || true)
-editable_globs=$(extract_array editable || true)
+readonly_file="\${TMPDIR:-/tmp}/autotester-readonly.$$"
+editable_file="\${TMPDIR:-/tmp}/autotester-editable.$$"
+extract_array readonly > "$readonly_file" || true
+extract_array editable > "$editable_file" || true
 
 # match_glob <path> <glob> -> exit 0 if path matches glob
 match_glob() {
@@ -109,35 +129,37 @@ match_glob() {
 }
 
 blocked=0
-staged=$(git diff --cached --name-only --diff-filter=ACMRT)
+staged_file="\${TMPDIR:-/tmp}/autotester-staged.$$"
+trap 'rm -f "$staged_file" "$readonly_file" "$editable_file"' EXIT HUP INT TERM
+git diff --cached --name-only --diff-filter=ACMRT > "$staged_file"
 
-for path in $staged; do
+while IFS= read -r path || [ -n "$path" ]; do
   # readonly check
-  for glob in $readonly_globs; do
+  while IFS= read -r glob || [ -n "$glob" ]; do
     [ -z "$glob" ] && continue
     if match_glob "$path" "$glob"; then
       echo "blocked: $path matches readonly glob '$glob'" >&2
       blocked=1
       break
     fi
-  done
+  done < "$readonly_file"
 
   # editable check (only enforced when editable list is non-empty)
-  if [ -n "$editable_globs" ]; then
+  if [ -s "$editable_file" ]; then
     allowed=0
-    for glob in $editable_globs; do
+    while IFS= read -r glob || [ -n "$glob" ]; do
       [ -z "$glob" ] && continue
       if match_glob "$path" "$glob"; then
         allowed=1
         break
       fi
-    done
+    done < "$editable_file"
     if [ "$allowed" -eq 0 ]; then
       echo "blocked: $path is outside editable globs" >&2
       blocked=1
     fi
   fi
-done
+done < "$staged_file"
 
 if [ "$blocked" -ne 0 ]; then
   echo "autotester pre-commit hook rejected the commit. Bypass with --no-verify." >&2

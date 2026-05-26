@@ -71,4 +71,11 @@ describe("loadProgram", () => {
     expect(program.path).toBe(join(repo, "program.md"));
     expect(program.text).toBe("repo program");
   });
+
+  it("reports parse errors in the target repo program.md", () => {
+    const repo = mkdtempSync(join(tmpdir(), "autotester-"));
+    writeFileSync(join(repo, "program.md"), "---\ntemperature: 0.7\n---\nbody", "utf8");
+
+    expect(() => loadProgram(repo)).toThrow(/unknown key 'temperature'/);
+  });
 });

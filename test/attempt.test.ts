@@ -25,6 +25,16 @@ describe("attempt manifest", () => {
     expect(() => requireBugfixManifest(m)).toThrow(/repro_command/);
   });
 
+  it("rejects non-string entries in bugfix file lists", () => {
+    expect(() => parseAttemptManifest(JSON.stringify({
+      description: "bad file list",
+      repro_command: "python repro.py",
+      test_command: "pytest tests/test_parser.py -q",
+      test_files: ["tests/test_parser.py", 42],
+      fix_files: ["src/parser.py"],
+    }))).toThrow(/test_files\[1\]/);
+  });
+
   it("rejects invalid parent failure regex", () => {
     const m = parseAttemptManifest(JSON.stringify({
       description: "bad regex",

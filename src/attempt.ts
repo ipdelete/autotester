@@ -37,8 +37,8 @@ export function parseAttemptManifest(raw: string): AttemptManifest {
     description,
     repro_command: typeof parsed.repro_command === "string" ? parsed.repro_command : undefined,
     test_command: typeof parsed.test_command === "string" ? parsed.test_command : undefined,
-    test_files: Array.isArray(parsed.test_files) ? parsed.test_files.filter((v): v is string => typeof v === "string") : undefined,
-    fix_files: Array.isArray(parsed.fix_files) ? parsed.fix_files.filter((v): v is string => typeof v === "string") : undefined,
+    test_files: Array.isArray(parsed.test_files) ? asStringArray(parsed.test_files, "test_files") : undefined,
+    fix_files: Array.isArray(parsed.fix_files) ? asStringArray(parsed.fix_files, "fix_files") : undefined,
     parent_failure_pattern: typeof parsed.parent_failure_pattern === "string" ? parsed.parent_failure_pattern : undefined,
   };
 }

@@ -76,6 +76,72 @@ describe("pre-commit scope hook", () => {
     expect(log).toContain("allowed");
   });
 
+  it("allows commits within editable globs when a path contains spaces", () => {
+    const repo = mkRepo();
+    writeConfig(repo, { readonly: [], editable: ["src/**"] });
+    installPreCommitHook(repo);
+
+    execFileSync("mkdir", ["-p", join(repo, "src")]);
+    writeFileSync(join(repo, "src", "has space.py"), "x = 1\n", "utf8");
+    git(repo, ["add", "src/has space.py"]);
+    git(repo, ["commit", "-m", "allowed path with space"]);
+    const log = git(repo, ["log", "--oneline"]);
+    expect(log).toContain("allowed path with space");
+  });
+
+  it("allows editable glob entries that contain spaces", () => {
+    const repo = mkRepo();
+    writeConfig(repo, { readonly: [], editable: ["src/has space.py"] });
+    installPreCommitHook(repo);
+
+    execFileSync("mkdir", ["-p", join(repo, "src")]);
+    writeFileSync(join(repo, "src", "has space.py"), "x = 1\n", "utf8");
+    git(repo, ["add", "src/has space.py"]);
+    git(repo, ["commit", "-m", "allowed glob with space"]);
+    const log = git(repo, ["log", "--oneline"]);
+    expect(log).toContain("allowed glob with space");
+  });
+
+  it("allows editable glob entries that contain commas", () => {
+    const repo = mkRepo();
+    writeConfig(repo, { readonly: [], editable: ["src/has,comma.py"] });
+    installPreCommitHook(repo);
+
+    execFileSync("mkdir", ["-p", join(repo, "src")]);
+    writeFileSync(join(repo, "src", "has,comma.py"), "x = 1\n", "utf8");
+    git(repo, ["add", "src/has,comma.py"]);
+    git(repo, ["commit", "-m", "allowed glob with comma"]);
+    const log = git(repo, ["log", "--oneline"]);
+    expect(log).toContain("allowed glob with comma");
+  });
+
+  it("does not treat readonly values from other arrays as readonly globs", () => {
+    const repo = mkRepo();
+    writeConfig(repo, { readonly: [], editable: ["src/**"] });
+    writeFileSync(
+      join(repo, ".autotester.json"),
+      '{"readonly":[],"editable":["src/**"],"metadata":["README.md"]}\n',
+      "utf8",
+    );
+    installPreCommitHook(repo);
+
+    execFileSync("mkdir", ["-p", join(repo, "src")]);
+    writeFileSync(join(repo, "README.md"), "# changed\n", "utf8");
+    writeFileSync(join(repo, "src", "ok.py"), "x = 1\n", "utf8");
+    git(repo, ["add", "README.md", "src/ok.py"]);
+
+    let blocked = false;
+    try {
+      execFileSync("git", ["commit", "-m", "respect empty readonly"], { cwd: repo, stdio: "pipe" });
+    } catch (err) {
+      blocked = true;
+      const message = (err as { stderr?: Buffer }).stderr?.toString() ?? "";
+      expect(message).toContain("blocked: README.md is outside editable globs");
+      expect(message).not.toContain("matches readonly glob 'README.md'");
+    }
+    expect(blocked).toBe(true);
+  });
+
   it("chains an existing user hook", () => {
     const repo = mkRepo();
     const hookPath = join(repo, ".git", "hooks", "pre-commit");

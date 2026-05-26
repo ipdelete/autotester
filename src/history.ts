@@ -32,7 +32,8 @@ export function writeRunSummary(repo: string, summary: RunSummary): string {
   mkdirSync(dir, { recursive: true });
   // File name is sortable by start time + tag for predictable history order.
   const stamp = summary.startedAt.replace(/[:.]/g, "-");
-  const path = resolve(dir, `${stamp}_${summary.tag}.json`);
+  const safeTag = summary.tag.replace(/[\\/]/g, "-");
+  const path = resolve(dir, `${stamp}_${safeTag}.json`);
   writeFileSync(path, JSON.stringify(summary, null, 2) + "\n");
   return path;
 }

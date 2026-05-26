@@ -199,7 +199,8 @@ export function loadProgram(repo: string, programPath?: string): LoadedProgram {
     const { body, frontMatter } = parseFrontMatter(raw);
     return { path, text: body, frontMatter };
   } catch (error) {
-    if (programPath) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (programPath || code !== "ENOENT") throw error;
     const fallback = bundledProgramPath();
     const raw = readFileSync(fallback, "utf8");
     const { body, frontMatter } = parseFrontMatter(raw);
