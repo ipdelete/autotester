@@ -31,6 +31,8 @@ class BugfixValidation:
     ok: bool
     description: str
     graph_id: str | None = None
+    failed_stage: str | None = None
+    failure_detail: str | None = None
 
 
 REQUIRED_MANIFEST_FIELDS = {
@@ -140,7 +142,20 @@ def validate_bugfix_attempt(
             timeout=timeout,
         )
         save_and_run(graph, executor, store)
-        return BugfixValidation(ok=graph.ok, description=manifest.description, graph_id=graph.id)
+        if graph.ok:
+            return BugfixValidation(
+                ok=True,
+                description=manifest.description,
+                graph_id=graph.id,
+            )
+        failed_stage, failure_detail = _diagnose_validation_failure(graph, attempt=attempt)
+        return BugfixValidation(
+            ok=False,
+            description=manifest.description,
+            graph_id=graph.id,
+            failed_stage=failed_stage,
+            failure_detail=failure_detail,
+        )
     finally:
         _remove_worktree(repo, parent)
         _remove_worktree(repo, child)
@@ -198,6 +213,31 @@ def bugfix_validation_graph(
     graph.add(targeted, after=[child_repro])
     graph.add(full_gate, after=[targeted])
     return graph
+
+
+def _diagnose_validation_failure(
+    graph: TaskGraph, *, attempt: int,
+) -> tuple[str | None, str | None]:
+    """Return (stage, detail) for the first failed required task in ``graph``.
+
+    ``stage`` is the task title with the ``"bugfix {attempt} "`` prefix stripped
+    (e.g. ``"parent repro fails"``). ``detail`` is the task's error message or
+    the last non-empty line of its captured output, truncated for log-friendliness.
+    """
+    failed = graph.required_failed or graph.required_blocked
+    if not failed:
+        return None, None
+    task = failed[0]
+    prefix = f"bugfix {attempt} "
+    stage = task.title[len(prefix):] if task.title.startswith(prefix) else task.title
+    detail = task.error
+    if not detail and task.result is not None:
+        lines = [line for line in task.result.output.splitlines() if line.strip()]
+        if lines:
+            detail = lines[-1]
+    if detail and len(detail) > 200:
+        detail = detail[:197] + "..."
+    return stage, detail
 
 
 def _parent_repro_payload(parent: Path, *, root: Path, manifest: AttemptManifest) -> str:

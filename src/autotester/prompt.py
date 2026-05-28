@@ -28,7 +28,14 @@ def attempt_prompt(program: Program, *, attempt: int, best_metric: float) -> str
     ).strip()
 
 
-def bugfix_prompt(program: Program, *, attempt: int, verified_fixes: int) -> str:
+def bugfix_prompt(
+    program: Program,
+    *,
+    attempt: int,
+    verified_fixes: int,
+    prior_failures: list[str] | None = None,
+) -> str:
+    prior_failures_block = _format_prior_failures(prior_failures)
     return dedent(
         f"""
         You are running inside autotester bugfix mode. Find exactly one real bug,
@@ -47,9 +54,26 @@ def bugfix_prompt(program: Program, *, attempt: int, verified_fixes: int) -> str
         - Do not write .autotester/attempt.json; the harness reads the manifest from
           your persisted assistant output.
         - Do not edit autotester's task database or run history.
-
+        {prior_failures_block}
         Program instructions from {program.path}:
 
         {program.body.strip()}
         """
     ).strip()
+
+
+def _format_prior_failures(prior_failures: list[str] | None) -> str:
+    if not prior_failures:
+        return ""
+    bullets = "\n".join(f"        - {item}" for item in prior_failures)
+    return dedent(
+        """
+
+        Recent attempt failures (do not repeat these mistakes):
+{bullets}
+
+        The most common cause of "parent repro fails" is proposing a fix for
+        behavior that is already correct on baseline. Before committing, run
+        your repro on the unmodified HEAD and confirm it actually fails.
+        """
+    ).format(bullets=bullets)

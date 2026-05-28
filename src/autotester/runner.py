@@ -132,6 +132,7 @@ def run(options: RunOptions) -> int:
 
         verified_fixes = 0
         consecutive_no_finding = 0
+        prior_failures: list[str] = []
         for attempt in range(1, options.max_attempts + 1):
             if mode == "bugfix":
                 outcome = _run_bugfix_attempt(
@@ -143,13 +144,16 @@ def run(options: RunOptions) -> int:
                     attempt=attempt,
                     verified_fixes=verified_fixes,
                     timeout=options.attempt_timeout,
+                    prior_failures=prior_failures,
                 )
                 if outcome.status == "keep":
                     verified_fixes += 1
                     best_metric = outcome.metric
                     consecutive_no_finding = 0
+                    prior_failures = []
                 elif outcome.description == "no finding produced":
                     consecutive_no_finding += 1
+                    prior_failures = _record_prior_failure(prior_failures, outcome.description)
                     if consecutive_no_finding >= options.max_no_finding_attempts:
                         _record(executor, store, outcome)
                         print(
@@ -160,6 +164,7 @@ def run(options: RunOptions) -> int:
                         break
                 else:
                     consecutive_no_finding = 0
+                    prior_failures = _record_prior_failure(prior_failures, outcome.description)
             else:
                 outcome = _run_optimize_attempt(
                     repo=repo,
@@ -218,6 +223,14 @@ def _run_optimize_attempt(
     )
 
 
+PRIOR_FAILURE_WINDOW = 3
+
+
+def _record_prior_failure(prior: list[str], description: str) -> list[str]:
+    """Append ``description`` to the recent-failure window, capped at PRIOR_FAILURE_WINDOW."""
+    return [*prior, description][-PRIOR_FAILURE_WINDOW:]
+
+
 def _run_bugfix_attempt(
     *,
     repo: Path,
@@ -228,8 +241,14 @@ def _run_bugfix_attempt(
     attempt: int,
     verified_fixes: int,
     timeout: float,
+    prior_failures: list[str] | None = None,
 ) -> Adjudication:
-    prompt = bugfix_prompt(program, attempt=attempt, verified_fixes=verified_fixes)
+    prompt = bugfix_prompt(
+        program,
+        attempt=attempt,
+        verified_fixes=verified_fixes,
+        prior_failures=prior_failures,
+    )
     graph, tasks = bugfix_attempt_graph(repo, attempt=attempt, prompt=prompt, timeout=timeout)
     started = time.monotonic()
     save_and_run(graph, executor, store)
@@ -268,9 +287,15 @@ def _run_bugfix_attempt(
         )
     if not validation.ok:
         save_and_run(reset_graph(repo, before, attempt), executor, store)
+        if validation.failed_stage:
+            reason = f"bugfix validation failed at: {validation.failed_stage}"
+            if validation.failure_detail:
+                reason += f" — {validation.failure_detail}"
+        else:
+            reason = "bugfix validation graph failed"
         return Adjudication(
             "attempt", attempt, "discard", float("inf"), before[:12],
-            "bugfix validation graph failed", elapsed_s, validation.graph_id or graph.id,
+            reason, elapsed_s, validation.graph_id or graph.id,
         )
     metric = -(verified_fixes + 1)
     return Adjudication(

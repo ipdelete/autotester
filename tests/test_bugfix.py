@@ -123,6 +123,58 @@ def test_validate_bugfix_attempt_proves_parent_fail_child_pass(tmp_path: Path):
 
     assert result.ok is True
     assert result.graph_id in store.graphs
+    assert result.failed_stage is None
+    assert result.failure_detail is None
+
+
+def test_validate_bugfix_attempt_reports_parent_repro_pass(tmp_path: Path):
+    """When the proposed bug is already correct on parent, failed_stage names the parent_repro task."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "test")
+    # Parent already has the "correct" behavior the agent claims to fix.
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial already correct")
+    before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Child commits a no-op "fix" plus a test that passes on both commits.
+    (repo / "calc.py").write_text("def add(a, b):\n    # no-op comment\n    return a + b\n")
+    (repo / "test_calc.py").write_text(
+        "from calc import add\n\n"
+        "def test_add():\n"
+        "    assert add(2, 3) == 5\n"
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fake fix")
+    after = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    manifest = manifest_from_dict({
+        "description": "Fake fix for already-correct behavior",
+        "repro_command": "python - <<'PY'\nfrom calc import add\nassert add(2, 3) == 5\nPY",
+        "test_command": "python -m pytest test_calc.py -q",
+        "test_files": ["test_calc.py"],
+        "fix_files": ["calc.py"],
+    })
+    store = SQLiteStore(tmp_path / "ttasks.db")
+    executor = TaskExecutor(store=store)
+
+    result = validate_bugfix_attempt(
+        repo=repo,
+        store=store,
+        executor=executor,
+        before=before,
+        after=after,
+        attempt=4,
+        gate="python -m pytest -q",
+        manifest=manifest,
+        timeout=30,
+    )
+
+    assert result.ok is False
+    assert result.failed_stage == "parent repro fails"
+    assert result.graph_id in store.graphs
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
